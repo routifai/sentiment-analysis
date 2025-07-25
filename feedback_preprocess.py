@@ -4,7 +4,7 @@ import re
 import json
 import logging
 from typing import List, Dict, Tuple, Optional
-from src.config import DB_CONFIG, OPENAI_API_KEY
+from config import DB_CONFIG, OPENAI_API_KEY
 import openai
 import instructor
 from pydantic import BaseModel
@@ -23,6 +23,10 @@ class FeedbackConfirmation(BaseModel):
     has_feedback_tone: bool
     confidence_score: float
     reasoning: str
+
+class BatchFeedbackConfirmation(BaseModel):
+    """Model for batch feedback confirmation results."""
+    results: List[FeedbackConfirmation]
 
 class FeedbackAnalyzerOptimized:
     def __init__(self, api_key=None, model="gpt-4o", batch_size=100, cache_results=True):
@@ -332,7 +336,7 @@ class FeedbackAnalyzerOptimized:
             client_with_instructor = instructor.from_openai(self.client)
             response = client_with_instructor.chat.completions.create(
                 model=self.model,
-                response_model=FeedbackConfirmation,
+                response_model=BatchFeedbackConfirmation,
                 messages=[
                     {"role": "system", "content": "You are confirming whether user inputs contain feedback tone. Focus only on whether the user is providing feedback, not on sentiment analysis."},
                     {"role": "user", "content": prompt}
@@ -341,20 +345,84 @@ class FeedbackAnalyzerOptimized:
                 temperature=0.2
             )
             
-            return response
+            return response.results
             
         except Exception as e:
-            logger.error(f"Error confirming feedback with LLM: {str(e)}")
-            # Return default confirmation
-            return FeedbackConfirmation(
-                has_feedback_tone=False,
-                confidence_score=0.0,
-                reasoning=f"Error during confirmation: {str(e)}"
-            )
+            logger.error(f"Error confirming feedback with LLM batch processing: {str(e)}")
+            logger.info("Falling back to individual message processing...")
+            return self._confirm_feedback_individual(batch_messages)
+    
+    def _confirm_feedback_individual(self, messages):
+        """
+        Fallback method to process messages individually.
+        
+        Args:
+            messages: List of message dictionaries
+            
+        Returns:
+            List of confirmation results
+        """
+        results = []
+        
+        for i, msg in enumerate(messages):
+            try:
+                # Create individual prompt
+                text = msg['row_data']['input']
+                keywords = msg['keywords']
+                score = msg['feedback_score']
+                
+                prompt = f"""Analyze this user input to determine if it contains feedback tone (not sentiment analysis).
+
+INPUT: "{text}"
+Keywords found: {', '.join(keywords) if keywords else 'None'}
+Feedback score: {score:.1f}
+
+ANALYSIS CRITERIA:
+1. Does the user input express feedback, opinion, or evaluation about something?
+2. Is the user providing their thoughts, suggestions, or reactions?
+3. Is this more than just a factual question or request?
+
+Focus ONLY on whether it's feedback, not on positive/negative sentiment.
+
+Respond with:
+- has_feedback_tone: True/False
+- confidence_score: 0-1 scale
+- reasoning: Brief explanation
+"""
+                
+                # Use instructor for structured output
+                client_with_instructor = instructor.from_openai(self.client)
+                response = client_with_instructor.chat.completions.create(
+                    model=self.model,
+                    response_model=FeedbackConfirmation,
+                    messages=[
+                        {"role": "system", "content": "You are confirming whether user inputs contain feedback tone. Focus only on whether the user is providing feedback, not on sentiment analysis."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=200,
+                    temperature=0.2
+                )
+                
+                results.append(response)
+                
+                # Rate limiting for individual processing
+                if i < len(messages) - 1:
+                    time.sleep(0.1)
+                    
+            except Exception as e:
+                logger.error(f"Error processing individual message {i}: {str(e)}")
+                # Return default confirmation for this message
+                results.append(FeedbackConfirmation(
+                    has_feedback_tone=False,
+                    confidence_score=0.0,
+                    reasoning=f"Error during individual processing: {str(e)}"
+                ))
+        
+        return results
     
     def _create_confirmation_prompt(self, batch_messages):
         """Create a prompt for batch feedback confirmation."""
-        prompt = "Confirm whether these user inputs contain feedback tone (not sentiment analysis).\n\n"
+        prompt = "Analyze each user input below to determine if it contains feedback tone (not sentiment analysis).\n\n"
         
         for i, msg in enumerate(batch_messages, 1):
             text = msg['row_data']['input']
@@ -366,17 +434,19 @@ class FeedbackAnalyzerOptimized:
             prompt += f"Feedback score: {score:.1f}\n\n"
         
         prompt += """
-CONFIRMATION CRITERIA:
+ANALYSIS CRITERIA:
 1. Does the user input express feedback, opinion, or evaluation about something?
 2. Is the user providing their thoughts, suggestions, or reactions?
 3. Is this more than just a factual question or request?
 
 Focus ONLY on whether it's feedback, not on positive/negative sentiment.
 
-Respond with:
+For each input, provide:
 - has_feedback_tone: True/False
 - confidence_score: 0-1 scale
 - reasoning: Brief explanation
+
+Return results as a list of FeedbackConfirmation objects, one for each input.
 """
         
         return prompt
@@ -435,6 +505,18 @@ Respond with:
                     # Confirm non-cached messages
                     if batch_to_confirm:
                         llm_results = self.confirm_feedback_with_llm(batch_to_confirm)
+                        
+                        # Validate results length
+                        if len(llm_results) != len(batch_to_confirm):
+                            logger.warning(f"Batch result count mismatch: expected {len(batch_to_confirm)}, got {len(llm_results)}")
+                            # Pad or truncate results to match expected count
+                            while len(llm_results) < len(batch_to_confirm):
+                                llm_results.append(FeedbackConfirmation(
+                                    has_feedback_tone=False,
+                                    confidence_score=0.0,
+                                    reasoning="Missing result from batch processing"
+                                ))
+                            llm_results = llm_results[:len(batch_to_confirm)]
                         
                         # Cache results
                         for i, msg in enumerate(batch_to_confirm):
