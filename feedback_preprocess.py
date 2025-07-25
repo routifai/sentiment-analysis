@@ -171,7 +171,10 @@ class FeedbackAnalyzerOptimized:
     
     def _get_cache_key(self, text):
         """Generate cache key for text."""
-        return hashlib.md5(text.encode()).hexdigest()
+        if not text or pd.isna(text):
+            return hashlib.md5("EMPTY_INPUT".encode()).hexdigest()
+        # Add length to reduce collision risk
+        return hashlib.md5(f"{text}:{len(text)}".encode()).hexdigest()
     
     def connect_to_database(self):
         """Connect to the database and return connection."""
@@ -332,6 +335,16 @@ class FeedbackAnalyzerOptimized:
             # Prepare batch prompt for confirmation
             prompt = self._create_confirmation_prompt(batch_messages)
             
+            # Calculate dynamic token limit based on batch size
+            base_tokens = 800
+            tokens_per_message = 50  # Approximate tokens per message
+            dynamic_max_tokens = base_tokens + (len(batch_messages) * tokens_per_message)
+            
+            # Cap at reasonable limit
+            max_tokens = min(dynamic_max_tokens, 4000)
+            
+            logger.info(f"Processing batch of {len(batch_messages)} messages with max_tokens={max_tokens}")
+            
             # Use instructor for structured output
             client_with_instructor = instructor.from_openai(self.client)
             response = client_with_instructor.chat.completions.create(
@@ -341,7 +354,7 @@ class FeedbackAnalyzerOptimized:
                     {"role": "system", "content": "You are confirming whether user inputs contain feedback tone. Focus only on whether the user is providing feedback, not on sentiment analysis."},
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=800,  # Increased for batch processing
+                max_tokens=max_tokens,
                 temperature=0.2
             )
             
@@ -366,10 +379,24 @@ class FeedbackAnalyzerOptimized:
         
         for i, msg in enumerate(messages):
             try:
+                # Validate message structure
+                if 'row_data' not in msg or 'input' not in msg['row_data']:
+                    logger.warning(f"Invalid message structure at index {i}")
+                    results.append(FeedbackConfirmation(
+                        has_feedback_tone=False,
+                        confidence_score=0.0,
+                        reasoning="Invalid message structure"
+                    ))
+                    continue
+                
                 # Create individual prompt
                 text = msg['row_data']['input']
-                keywords = msg['keywords']
-                score = msg['feedback_score']
+                keywords = msg.get('keywords', [])
+                score = msg.get('feedback_score', 0.0)
+                
+                # Validate input text
+                if not text or pd.isna(text):
+                    text = "[EMPTY INPUT]"
                 
                 prompt = f"""Analyze this user input to determine if it contains feedback tone (not sentiment analysis).
 
@@ -429,6 +456,10 @@ Respond with:
             keywords = msg['keywords']
             score = msg['feedback_score']
             
+            # Validate input
+            if not text or pd.isna(text):
+                text = "[EMPTY INPUT]"
+            
             prompt += f"INPUT {i}: \"{text}\"\n"
             prompt += f"Keywords found: {', '.join(keywords) if keywords else 'None'}\n"
             prompt += f"Feedback score: {score:.1f}\n\n"
@@ -441,12 +472,13 @@ ANALYSIS CRITERIA:
 
 Focus ONLY on whether it's feedback, not on positive/negative sentiment.
 
+IMPORTANT: Return exactly one result per input, in the same order as the inputs above.
 For each input, provide:
 - has_feedback_tone: True/False
 - confidence_score: 0-1 scale
 - reasoning: Brief explanation
 
-Return results as a list of FeedbackConfirmation objects, one for each input.
+Return a list of FeedbackConfirmation objects, one for each input in order.
 """
         
         return prompt
@@ -488,7 +520,10 @@ Return results as a list of FeedbackConfirmation objects, one for each input.
                     batch_num = batch_idx // self.batch_size + 1
                     total_batches = (len(potential_feedback) + self.batch_size - 1) // self.batch_size
                     
-                    logger.info(f"Processing feedback batch {batch_num}/{total_batches} ({len(batch)} messages)")
+                    # Validate and potentially reduce batch size
+                    adjusted_batch_size = self._validate_batch_size(batch)
+                    
+                    logger.info(f"Processing feedback batch {batch_num}/{total_batches} ({len(batch)} messages, adjusted batch size: {adjusted_batch_size})")
                     
                     # Check cache for each message in batch
                     batch_to_confirm = []
@@ -619,6 +654,38 @@ Return results as a list of FeedbackConfirmation objects, one for each input.
         except Exception as e:
             logger.error(f"Error processing messages: {str(e)}")
             raise
+
+    def _validate_batch_size(self, messages):
+        """
+        Validate and potentially reduce batch size to prevent token limit issues.
+        
+        Args:
+            messages: List of messages to process
+            
+        Returns:
+            Adjusted batch size
+        """
+        if len(messages) <= self.batch_size:
+            return len(messages)
+        
+        # Estimate tokens for current batch
+        estimated_tokens = 0
+        for msg in messages[:self.batch_size]:
+            text = msg['row_data']['input']
+            if text and not pd.isna(text):
+                estimated_tokens += len(text.split()) * 1.3  # Rough token estimation
+        
+        # Add prompt overhead
+        estimated_tokens += 500  # Base prompt tokens
+        
+        # If estimated tokens > 3000, reduce batch size
+        if estimated_tokens > 3000:
+            # Calculate safe batch size
+            safe_batch_size = max(1, int(self.batch_size * (3000 / estimated_tokens)))
+            logger.warning(f"Reducing batch size from {self.batch_size} to {safe_batch_size} due to token limit concerns")
+            return safe_batch_size
+        
+        return self.batch_size
 
 def main():
     """Main function to run the optimized feedback analysis."""
