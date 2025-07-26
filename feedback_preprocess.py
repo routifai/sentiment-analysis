@@ -3,23 +3,54 @@ import pandas as pd
 import re
 import json
 import logging
-from typing import List, Dict, Tuple, Optional
-from config import DB_CONFIG, OPENAI_API_KEY
+import pickle
+import hashlib
+import os
+import time
 import openai
 import instructor
+from typing import List, Dict, Tuple, Optional
 from pydantic import BaseModel
 from datetime import datetime
-import time
-import hashlib
-import pickle
-import os
+from dataclasses import dataclass
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
+# ============================================================================
+# CONFIGURATION CLASSES
+# ============================================================================
+
+@dataclass
+class DatabaseConfig:
+    """Database configuration."""
+    host: str
+    port: int
+    database: str
+    user: str
+    password: str
+
+@dataclass
+class AnalyzerConfig:
+    """Analyzer configuration."""
+    openai_api_key: str
+    model: str = "gpt-4o"
+    batch_size: int = 10  # Smaller for better accuracy
+    cache_enabled: bool = True
+    cache_file: str = "feedback_cache.pkl"
+    max_tokens: int = 4000
+    temperature: float = 0.2
+
+# ============================================================================
+# PYDANTIC MODELS
+# ============================================================================
+
 class FeedbackConfirmation(BaseModel):
-    """Model for feedback confirmation results."""
+    """Model for individual feedback confirmation results."""
     has_feedback_tone: bool
     confidence_score: float
     reasoning: str
@@ -28,700 +59,650 @@ class BatchFeedbackConfirmation(BaseModel):
     """Model for batch feedback confirmation results."""
     results: List[FeedbackConfirmation]
 
-class FeedbackAnalyzerOptimized:
-    def __init__(self, api_key=None, model="gpt-4o", batch_size=100, cache_results=True):
-        """Initialize the optimized feedback analyzer."""
-        self.api_key = api_key or OPENAI_API_KEY
-        if not self.api_key:
-            raise ValueError("OpenAI API key is required")
+# ============================================================================
+# DATABASE MANAGER
+# ============================================================================
+
+class DatabaseManager:
+    """Handles all database operations."""
+    
+    def __init__(self, config: DatabaseConfig):
+        self.config = config
+    
+    def get_connection(self):
+        """Get database connection."""
+        try:
+            return psycopg2.connect(
+                host=self.config.host,
+                port=self.config.port,
+                database=self.config.database,
+                user=self.config.user,
+                password=self.config.password
+            )
+        except Exception as e:
+            logger.error(f"Database connection failed: {e}")
+            raise
+    
+    def fetch_messages(self, limit: Optional[int] = None, offset: int = 0) -> pd.DataFrame:
+        """Fetch messages from database with pagination."""
+        query = """
+            SELECT emp_id, session_id, input, output, chat_type, timestamp
+            FROM chat_messages
+            ORDER BY timestamp DESC
+        """
         
-        self.client = openai.OpenAI(api_key=self.api_key)
-        self.model = model
-        self.batch_size = batch_size
-        self.cache_results = cache_results
-        self.cache_file = "feedback_confirmation_cache.pkl"
+        if limit:
+            query += f" LIMIT {limit}"
+        if offset:
+            query += f" OFFSET {offset}"
         
-        # Load existing cache
-        self.cache = self._load_cache()
-        
-        # Comprehensive feedback keywords for preprocessing
-        self.feedback_keywords = [
-            # Direct feedback indicators
-            'feedback', 'review', 'rating', 'score', 'evaluation', 'assessment',
-            'opinion', 'thought', 'view', 'perspective', 'experience',
-            'suggestion', 'recommendation', 'advice', 'tip', 'hint',
-            'comment', 'remark', 'note', 'observation', 'finding',
-            'report', 'analysis', 'study', 'research', 'investigation',
-            'survey', 'poll', 'questionnaire', 'response', 'answer',
-            'test', 'trial', 'experiment', 'pilot', 'beta',
-            'version', 'update', 'upgrade', 'improvement', 'enhancement',
-            'change', 'modification', 'adjustment', 'revision', 'edit',
-            'compare', 'comparison', 'versus', 'vs', 'difference',
-            'prefer', 'preference', 'choice', 'option', 'alternative',
-            'expect', 'expectation', 'anticipate', 'predict', 'forecast',
-            'hope', 'wish', 'want', 'need', 'require', 'demand',
-            'should', 'could', 'would', 'might', 'may', 'can',
-            'better', 'worse', 'same', 'different', 'similar',
-            'more', 'less', 'most', 'least', 'best', 'worst',
-            'always', 'never', 'sometimes', 'often', 'rarely',
-            'usually', 'typically', 'generally', 'normally', 'commonly',
+        with self.get_connection() as conn:
+            df = pd.read_sql_query(query, conn)
+            logger.info(f"Fetched {len(df)} messages (offset: {offset})")
+            return df
+
+# ============================================================================
+# PREPROCESSOR
+# ============================================================================
+
+class FeedbackPreprocessor:
+    """Handles text preprocessing and keyword analysis."""
+    
+    def __init__(self):
+        self.feedback_keywords = self._load_feedback_keywords()
+        self.feedback_patterns = self._load_feedback_patterns()
+    
+    def _load_feedback_keywords(self) -> List[str]:
+        """Load feedback keywords."""
+        return [
+            # Core feedback terms
+            'feedback', 'review', 'rating', 'opinion', 'suggestion', 'recommendation',
+            'comment', 'evaluation', 'assessment', 'thought', 'experience',
             
-            # Sentiment indicators that suggest feedback
-            'thank you', 'thanks', 'appreciate', 'grateful', 'pleased', 'happy', 'satisfied',
-            'excellent', 'great', 'good', 'amazing', 'wonderful', 'fantastic', 'brilliant',
-            'perfect', 'outstanding', 'superb', 'terrific', 'awesome', 'incredible',
-            'love it', 'love this', 'loving', 'enjoy', 'enjoying', 'enjoyed',
-            'helpful', 'useful', 'valuable', 'beneficial', 'effective', 'efficient',
-            'clear', 'understandable', 'well explained', 'well done', 'good job',
-            'impressive', 'impressed', 'surprised', 'exceeded expectations',
-            'worked', 'working', 'solved', 'solution', 'resolved', 'fixed',
-            'improved', 'better', 'best', 'optimal', 'optimized', 'enhanced',
-            'saved time', 'time saver', 'efficient', 'quick', 'fast', 'speedy',
-            'accurate', 'precise', 'correct', 'right', 'proper', 'appropriate',
-            'professional', 'quality', 'high quality', 'top notch', 'premium',
-            'user friendly', 'easy to use', 'intuitive', 'straightforward',
-            'comprehensive', 'detailed', 'thorough', 'complete', 'full',
-            'innovative', 'creative', 'original', 'unique', 'different',
-            'reliable', 'dependable', 'trustworthy', 'consistent', 'stable',
-            'cost effective', 'affordable', 'reasonable', 'worth it', 'value',
-            'supportive', 'helpful', 'assistance', 'guidance', 'direction',
-            'encouraging', 'motivating', 'inspiring', 'empowering', 'enabling',
-            'flexible', 'adaptable', 'customizable', 'personalized', 'tailored',
-            'modern', 'up to date', 'current', 'relevant', 'timely',
-            'secure', 'safe', 'protected', 'confidential', 'private',
-            'scalable', 'expandable', 'growable', 'future proof', 'sustainable',
+            # Positive indicators
+            'thank you', 'thanks', 'appreciate', 'helpful', 'useful', 'great',
+            'excellent', 'good', 'amazing', 'love', 'like', 'pleased', 'satisfied',
+            'worked', 'solved', 'improved', 'better', 'best', 'perfect',
             
-            # Negative feedback indicators
-            'not working', 'doesn\'t work', 'broken', 'failed', 'failure', 'error',
-            'problem', 'issue', 'trouble', 'difficult', 'hard', 'challenging',
-            'confusing', 'unclear', 'vague', 'ambiguous', 'unclear', 'unhelpful',
-            'useless', 'worthless', 'pointless', 'meaningless', 'irrelevant',
-            'bad', 'poor', 'terrible', 'awful', 'horrible', 'dreadful',
-            'disappointed', 'disappointing', 'let down', 'frustrated', 'frustrating',
-            'annoyed', 'annoying', 'irritated', 'irritating', 'angry', 'mad',
-            'upset', 'unhappy', 'sad', 'depressed', 'worried', 'concerned',
-            'confused', 'lost', 'stuck', 'blocked', 'hindered', 'prevented',
-            'slow', 'slower', 'sluggish', 'laggy', 'delayed', 'late',
-            'expensive', 'costly', 'overpriced', 'waste of money', 'not worth it',
-            'complicated', 'complex', 'overwhelming', 'too much', 'excessive',
-            'missing', 'lacking', 'incomplete', 'partial', 'inadequate',
-            'outdated', 'old', 'obsolete', 'deprecated', 'legacy',
-            'buggy', 'glitchy', 'unstable', 'crash', 'freeze', 'hang',
-            'insecure', 'unsafe', 'vulnerable', 'exposed', 'at risk',
-            'incompatible', 'conflict', 'clash', 'mismatch', 'wrong',
-            'inaccurate', 'incorrect', 'wrong', 'false', 'misleading',
-            'biased', 'unfair', 'discriminatory', 'prejudiced', 'partial',
-            'limited', 'restricted', 'constrained', 'narrow', 'small',
-            'redundant', 'repetitive', 'duplicate', 'copy', 'same',
-            'waste', 'wasted', 'unnecessary', 'needless', 'pointless',
-            'boring', 'dull', 'monotonous', 'repetitive', 'tedious',
-            'stressful', 'overwhelming', 'exhausting', 'tiring', 'draining',
-            'time consuming', 'takes too long', 'slow process', 'delayed',
-            'unreliable', 'inconsistent', 'unpredictable', 'variable',
-            'difficult to use', 'hard to understand', 'complex interface',
-            'poor quality', 'low quality', 'substandard', 'inferior',
-            'not user friendly', 'unintuitive', 'confusing interface',
-            'lack of features', 'missing functionality', 'limited options',
-            'poor performance', 'slow response', 'lag', 'freeze',
-            'technical issues', 'system problems', 'glitches', 'bugs',
-            'customer service', 'support issues', 'unhelpful staff',
-            'billing problems', 'payment issues', 'cost concerns',
-            'privacy concerns', 'security issues', 'data protection',
-            'accessibility issues', 'usability problems', 'design flaws'
+            # Negative indicators
+            'problem', 'issue', 'trouble', 'broken', 'failed', 'error',
+            'bad', 'poor', 'terrible', 'disappointed', 'frustrated', 'confused',
+            'difficult', 'hard', 'slow', 'doesn\'t work', 'not working',
+            'useless', 'unhelpful', 'unclear', 'complicated', 'buggy',
+            
+            # Comparative terms
+            'prefer', 'compare', 'versus', 'different', 'should', 'could', 
+            'would', 'expect', 'hope', 'wish', 'want', 'need'
         ]
-        
-        # Feedback patterns for more accurate preprocessing
-        self.feedback_patterns = [
+    
+    def _load_feedback_patterns(self) -> List[str]:
+        """Load regex patterns for feedback detection."""
+        return [
             r'\b(thank you|thanks|appreciate)\b',
             r'\b(feedback|review|rating|opinion)\b',
             r'\b(good|bad|great|terrible|excellent|poor)\b',
             r'\b(like|love|hate|dislike)\b',
             r'\b(helpful|useful|useless|unhelpful)\b',
             r'\b(work|working|broken|failed)\b',
-            r'\b(easy|difficult|hard|simple|complex)\b',
-            r'\b(fast|slow|quick|delayed)\b',
-            r'\b(clear|confusing|unclear|vague)\b',
+            r'\b(easy|difficult|hard|simple)\b',
             r'\b(should|could|would|might|need|want)\b',
-            r'\b(better|worse|best|worst|improve|improvement)\b',
-            r'\b(expect|hope|wish|want|need)\b',
-            r'\b(problem|issue|trouble|error)\b',
-            r'\b(satisfied|happy|pleased|disappointed|frustrated)\b',
-            r'\b(recommend|suggest|advice|tip)\b'
+            r'\b(better|worse|best|worst|improve)\b',
+            r'\b(problem|issue|trouble|error)\b'
         ]
+    
+    def clean_text(self, text: str) -> str:
+        """Clean and normalize text."""
+        if not text or pd.isna(text):
+            return ""
         
-        logger.info(f"Initialized Optimized Feedback Analyzer with model: {model}, batch_size: {batch_size}")
+        text = text.lower().strip()
+        text = re.sub(r'\s+', ' ', text)
+        text = re.sub(r'[^\w\s\']', ' ', text)
+        return text
     
-    def _load_cache(self):
-        """Load existing cache from file."""
-        if os.path.exists(self.cache_file):
-            try:
-                with open(self.cache_file, 'rb') as f:
-                    return pickle.load(f)
-            except Exception as e:
-                logger.warning(f"Could not load cache: {e}")
-        return {}
+    def extract_keywords(self, text: str) -> List[str]:
+        """Extract feedback keywords from text."""
+        if not text:
+            return []
+        
+        clean_text = self.clean_text(text)
+        found_keywords = []
+        
+        for keyword in self.feedback_keywords:
+            if keyword in clean_text:
+                found_keywords.append(keyword)
+        
+        return found_keywords
     
-    def _save_cache(self):
+    def count_pattern_matches(self, text: str) -> int:
+        """Count feedback pattern matches."""
+        if not text:
+            return 0
+        
+        matches = 0
+        for pattern in self.feedback_patterns:
+            if re.search(pattern, text, re.IGNORECASE):
+                matches += 1
+        
+        return matches
+    
+    def calculate_feedback_score(self, text: str) -> Tuple[List[str], int, float]:
+        """Calculate comprehensive feedback score."""
+        keywords = self.extract_keywords(text)
+        pattern_matches = self.count_pattern_matches(text)
+        
+        # Calculate weighted score
+        keyword_weight = 1.0
+        pattern_weight = 0.5
+        score = (len(keywords) * keyword_weight) + (pattern_matches * pattern_weight)
+        
+        return keywords, pattern_matches, score
+    
+    def is_potential_feedback(self, text: str) -> bool:
+        """Determine if text is potential feedback."""
+        keywords, pattern_matches, score = self.calculate_feedback_score(text)
+        
+        # Core feedback terms get priority
+        has_core_terms = any(term in self.clean_text(text) for term in 
+                           ['feedback', 'review', 'rating', 'opinion', 'suggestion'])
+        
+        return (
+            len(keywords) >= 2 or
+            pattern_matches >= 3 or
+            score >= 3.0 or
+            has_core_terms
+        )
+
+# ============================================================================
+# CACHE MANAGER
+# ============================================================================
+
+class CacheManager:
+    """Handles caching functionality."""
+    
+    def __init__(self, cache_file: str, enabled: bool = True):
+        self.cache_file = cache_file
+        self.enabled = enabled
+        self.cache: Dict[str, FeedbackConfirmation] = self._load_cache()
+    
+    def _load_cache(self) -> Dict[str, FeedbackConfirmation]:
+        """Load cache from file."""
+        if not self.enabled or not os.path.exists(self.cache_file):
+            return {}
+        
+        try:
+            with open(self.cache_file, 'rb') as f:
+                return pickle.load(f)
+        except Exception as e:
+            logger.warning(f"Could not load cache: {e}")
+            return {}
+    
+    def save_cache(self):
         """Save cache to file."""
+        if not self.enabled:
+            return
+        
         try:
             with open(self.cache_file, 'wb') as f:
                 pickle.dump(self.cache, f)
         except Exception as e:
             logger.warning(f"Could not save cache: {e}")
     
-    def _get_cache_key(self, text):
+    def get_cache_key(self, text: str) -> str:
         """Generate cache key for text."""
         if not text or pd.isna(text):
-            return hashlib.md5("EMPTY_INPUT".encode()).hexdigest()
-        # Add length to reduce collision risk
+            text = "EMPTY_INPUT"
         return hashlib.md5(f"{text}:{len(text)}".encode()).hexdigest()
     
-    def connect_to_database(self):
-        """Connect to the database and return connection."""
+    def get(self, text: str) -> Optional[FeedbackConfirmation]:
+        """Get cached result."""
+        if not self.enabled:
+            return None
+        
+        key = self.get_cache_key(text)
+        return self.cache.get(key)
+    
+    def set(self, text: str, result: FeedbackConfirmation):
+        """Cache result."""
+        if not self.enabled:
+            return
+        
+        key = self.get_cache_key(text)
+        self.cache[key] = result
+
+# ============================================================================
+# LLM CLIENT
+# ============================================================================
+
+class LLMClient:
+    """Handles all LLM interactions."""
+    
+    def __init__(self, config: AnalyzerConfig):
+        self.config = config
+        self.client = openai.OpenAI(api_key=config.openai_api_key)
+        self.instructor_client = instructor.from_openai(self.client)
+    
+    def analyze_single_message(self, text: str, keywords: List[str], score: float) -> FeedbackConfirmation:
+        """Analyze a single message for feedback tone."""
+        prompt = self._create_single_message_prompt(text, keywords, score)
+        
         try:
-            conn = psycopg2.connect(**DB_CONFIG)
-            logger.info("Successfully connected to database")
-            return conn
+            response = self.instructor_client.chat.completions.create(
+                model=self.config.model,
+                response_model=FeedbackConfirmation,
+                messages=[
+                    {"role": "system", "content": self._get_system_prompt()},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=200,
+                temperature=self.config.temperature
+            )
+            return response
+        
         except Exception as e:
-            logger.error(f"Database connection failed: {str(e)}")
-            raise
+            logger.error(f"Error analyzing single message: {e}")
+            return FeedbackConfirmation(
+                has_feedback_tone=False,
+                confidence_score=0.0,
+                reasoning=f"Analysis failed: {str(e)}"
+            )
     
-    def fetch_messages_from_db(self, limit=None, offset=0):
-        """
-        Fetch messages from the database with pagination.
-        
-        Args:
-            limit: Optional limit on number of records to fetch
-            offset: Offset for pagination
-            
-        Returns:
-            DataFrame with columns [emp_id, session_id, input, output, chat_type, timestamp]
-        """
-        conn = self.connect_to_database()
-        try:
-            query = """
-                SELECT emp_id, session_id, input, output, chat_type, timestamp
-                FROM chat_messages
-                ORDER BY timestamp DESC
-            """
-            
-            if limit:
-                query += f" LIMIT {limit}"
-            if offset:
-                query += f" OFFSET {offset}"
-            
-            df = pd.read_sql_query(query, conn)
-            logger.info(f"Fetched {len(df)} messages from database (offset: {offset})")
-            return df
-            
-        except Exception as e:
-            logger.error(f"Error fetching messages: {str(e)}")
-            raise
-        finally:
-            conn.close()
-    
-    def preprocess_text(self, text):
-        """Preprocess text for keyword analysis."""
-        if not text or pd.isna(text):
-            return ""
-        
-        # Convert to lowercase
-        text = text.lower()
-        
-        # Remove extra whitespace
-        text = re.sub(r'\s+', ' ', text).strip()
-        
-        # Remove special characters but keep apostrophes for contractions
-        text = re.sub(r'[^\w\s\']', ' ', text)
-        
-        return text
-    
-    def extract_feedback_keywords(self, text):
-        """Extract feedback-related keywords from text."""
-        if not text:
+    def analyze_batch_messages(self, messages_data: List[dict]) -> List[FeedbackConfirmation]:
+        """Analyze batch of messages for feedback tone."""
+        if not messages_data:
             return []
         
-        found_keywords = []
+        prompt = self._create_batch_prompt(messages_data)
         
-        # Check for feedback keywords
-        for keyword in self.feedback_keywords:
-            if keyword in text:
-                found_keywords.append(keyword)
-        
-        return found_keywords
-    
-    def check_feedback_patterns(self, text):
-        """Check for feedback patterns using regex."""
-        if not text:
-            return 0
-        
-        pattern_matches = 0
-        for pattern in self.feedback_patterns:
-            if re.search(pattern, text, re.IGNORECASE):
-                pattern_matches += 1
-        
-        return pattern_matches
-    
-    def preprocess_for_feedback(self, messages_df):
-        """
-        Preprocess messages to identify potential feedback candidates.
-        This is the key optimization - we only send messages to LLM that are likely to be feedback.
-        """
-        logger.info("Preprocessing messages for potential feedback...")
-        
-        potential_feedback = []
-        non_feedback = []
-        
-        for idx, row in messages_df.iterrows():
-            preprocessed_text = self.preprocess_text(row['input'])
-            
-            # Extract keywords
-            keywords = self.extract_feedback_keywords(preprocessed_text)
-            keyword_count = len(keywords)
-            
-            # Check patterns
-            pattern_matches = self.check_feedback_patterns(row['input'])
-            
-            # Calculate feedback score
-            feedback_score = keyword_count + (pattern_matches * 0.5)
-            
-            # Determine if this is likely feedback
-            is_potential_feedback = (
-                keyword_count >= 2 or  # At least 2 feedback keywords
-                pattern_matches >= 3 or  # At least 3 pattern matches
-                feedback_score >= 3 or  # High overall score
-                any(keyword in preprocessed_text for keyword in ['feedback', 'review', 'rating', 'opinion', 'suggestion'])
+        try:
+            # Calculate dynamic token limit
+            base_tokens = 800
+            tokens_per_message = 50
+            max_tokens = min(
+                base_tokens + (len(messages_data) * tokens_per_message),
+                self.config.max_tokens
             )
             
-            if is_potential_feedback:
-                potential_feedback.append({
-                    'row_data': row,
-                    'keywords': keywords,
-                    'keyword_count': keyword_count,
-                    'pattern_matches': pattern_matches,
-                    'feedback_score': feedback_score
-                })
-            else:
-                non_feedback.append({
-                    'row_data': row,
-                    'keywords': keywords,
-                    'keyword_count': keyword_count,
-                    'pattern_matches': pattern_matches,
-                    'feedback_score': feedback_score
-                })
-        
-        logger.info(f"Preprocessing complete:")
-        logger.info(f"  Potential feedback messages: {len(potential_feedback)}")
-        logger.info(f"  Non-feedback messages: {len(non_feedback)}")
-        logger.info(f"  Total messages: {len(messages_df)}")
-        logger.info(f"  Reduction in LLM calls: {len(non_feedback)} messages ({(len(non_feedback)/len(messages_df)*100):.1f}%)")
-        
-        return potential_feedback, non_feedback
-    
-    def confirm_feedback_with_llm(self, batch_messages):
-        """
-        Use LLM to confirm if preprocessed messages actually contain feedback tone.
-        
-        Args:
-            batch_messages: List of message dictionaries that passed preprocessing
+            logger.info(f"Processing batch of {len(messages_data)} messages with max_tokens={max_tokens}")
             
-        Returns:
-            List of confirmation results
-        """
-        if not batch_messages:
-            return []
-        
-        try:
-            # Prepare batch prompt for confirmation
-            prompt = self._create_confirmation_prompt(batch_messages)
-            
-            # Calculate dynamic token limit based on batch size
-            base_tokens = 800
-            tokens_per_message = 50  # Approximate tokens per message
-            dynamic_max_tokens = base_tokens + (len(batch_messages) * tokens_per_message)
-            
-            # Cap at reasonable limit
-            max_tokens = min(dynamic_max_tokens, 4000)
-            
-            logger.info(f"Processing batch of {len(batch_messages)} messages with max_tokens={max_tokens}")
-            
-            # Use instructor for structured output
-            client_with_instructor = instructor.from_openai(self.client)
-            response = client_with_instructor.chat.completions.create(
-                model=self.model,
+            response = self.instructor_client.chat.completions.create(
+                model=self.config.model,
                 response_model=BatchFeedbackConfirmation,
                 messages=[
-                    {"role": "system", "content": "You are confirming whether user inputs contain feedback tone. Focus only on whether the user is providing feedback, not on sentiment analysis."},
+                    {"role": "system", "content": self._get_system_prompt()},
                     {"role": "user", "content": prompt}
                 ],
                 max_tokens=max_tokens,
-                temperature=0.2
+                temperature=self.config.temperature
             )
             
+            # Validate response count matches input count
+            if len(response.results) != len(messages_data):
+                logger.warning(f"Batch result mismatch: expected {len(messages_data)}, got {len(response.results)}")
+                return self._fallback_to_individual(messages_data)
+            
             return response.results
-            
-        except Exception as e:
-            logger.error(f"Error confirming feedback with LLM batch processing: {str(e)}")
-            logger.info("Falling back to individual message processing...")
-            return self._confirm_feedback_individual(batch_messages)
-    
-    def _confirm_feedback_individual(self, messages):
-        """
-        Fallback method to process messages individually.
         
-        Args:
-            messages: List of message dictionaries
-            
-        Returns:
-            List of confirmation results
-        """
+        except Exception as e:
+            logger.error(f"Batch analysis failed: {e}")
+            return self._fallback_to_individual(messages_data)
+    
+    def _fallback_to_individual(self, messages_data: List[dict]) -> List[FeedbackConfirmation]:
+        """Fallback to individual message processing."""
+        logger.info("Falling back to individual message processing")
         results = []
         
-        for i, msg in enumerate(messages):
-            try:
-                # Validate message structure
-                if 'row_data' not in msg or 'input' not in msg['row_data']:
-                    logger.warning(f"Invalid message structure at index {i}")
-                    results.append(FeedbackConfirmation(
-                        has_feedback_tone=False,
-                        confidence_score=0.0,
-                        reasoning="Invalid message structure"
-                    ))
-                    continue
-                
-                # Create individual prompt
-                text = msg['row_data']['input']
-                keywords = msg.get('keywords', [])
-                score = msg.get('feedback_score', 0.0)
-                
-                # Validate input text
-                if not text or pd.isna(text):
-                    text = "[EMPTY INPUT]"
-                
-                prompt = f"""Analyze this user input to determine if it contains feedback tone (not sentiment analysis).
+        for msg_data in messages_data:
+            result = self.analyze_single_message(
+                msg_data['text'],
+                msg_data['keywords'],
+                msg_data['score']
+            )
+            results.append(result)
+            time.sleep(0.1)  # Rate limiting
+        
+        return results
+    
+    def _get_system_prompt(self) -> str:
+        """Get system prompt for feedback analysis."""
+        return """You are analyzing user inputs to determine if they contain feedback tone. 
+        Focus on whether the user is providing feedback, opinions, or evaluations - not just sentiment.
+        Be precise and consistent in your analysis."""
+    
+    def _create_single_message_prompt(self, text: str, keywords: List[str], score: float) -> str:
+        """Create prompt for single message analysis."""
+        return f"""Analyze this user input for feedback tone:
 
 INPUT: "{text}"
 Keywords found: {', '.join(keywords) if keywords else 'None'}
 Feedback score: {score:.1f}
 
-ANALYSIS CRITERIA:
-1. Does the user input express feedback, opinion, or evaluation about something?
-2. Is the user providing their thoughts, suggestions, or reactions?
+Determine if this contains feedback tone based on:
+1. Does the user express opinions, evaluations, or reactions?
+2. Are they providing thoughts, suggestions, or assessments?
 3. Is this more than just a factual question or request?
 
-Focus ONLY on whether it's feedback, not on positive/negative sentiment.
-
-Respond with:
-- has_feedback_tone: True/False
-- confidence_score: 0-1 scale
-- reasoning: Brief explanation
-"""
-                
-                # Use instructor for structured output
-                client_with_instructor = instructor.from_openai(self.client)
-                response = client_with_instructor.chat.completions.create(
-                    model=self.model,
-                    response_model=FeedbackConfirmation,
-                    messages=[
-                        {"role": "system", "content": "You are confirming whether user inputs contain feedback tone. Focus only on whether the user is providing feedback, not on sentiment analysis."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    max_tokens=200,
-                    temperature=0.2
-                )
-                
-                results.append(response)
-                
-                # Rate limiting for individual processing
-                if i < len(messages) - 1:
-                    time.sleep(0.1)
-                    
-            except Exception as e:
-                logger.error(f"Error processing individual message {i}: {str(e)}")
-                # Return default confirmation for this message
-                results.append(FeedbackConfirmation(
-                    has_feedback_tone=False,
-                    confidence_score=0.0,
-                    reasoning=f"Error during individual processing: {str(e)}"
-                ))
-        
-        return results
+Respond with has_feedback_tone (True/False), confidence_score (0-1), and brief reasoning."""
     
-    def _create_confirmation_prompt(self, batch_messages):
-        """Create a prompt for batch feedback confirmation."""
-        prompt = "Analyze each user input below to determine if it contains feedback tone (not sentiment analysis).\n\n"
+    def _create_batch_prompt(self, messages_data: List[dict]) -> str:
+        """Create prompt for batch analysis."""
+        prompt = "Analyze each input for feedback tone. Return results in the EXACT same order as inputs:\n\n"
         
-        for i, msg in enumerate(batch_messages, 1):
-            text = msg['row_data']['input']
-            keywords = msg['keywords']
-            score = msg['feedback_score']
-            
-            # Validate input
-            if not text or pd.isna(text):
-                text = "[EMPTY INPUT]"
-            
-            prompt += f"INPUT {i}: \"{text}\"\n"
-            prompt += f"Keywords found: {', '.join(keywords) if keywords else 'None'}\n"
-            prompt += f"Feedback score: {score:.1f}\n\n"
+        for i, msg_data in enumerate(messages_data, 1):
+            prompt += f"INPUT {i}: \"{msg_data['text']}\"\n"
+            prompt += f"Keywords: {', '.join(msg_data['keywords']) if msg_data['keywords'] else 'None'}\n"
+            prompt += f"Score: {msg_data['score']:.1f}\n\n"
         
-        prompt += """
-ANALYSIS CRITERIA:
-1. Does the user input express feedback, opinion, or evaluation about something?
-2. Is the user providing their thoughts, suggestions, or reactions?
-3. Is this more than just a factual question or request?
-
-Focus ONLY on whether it's feedback, not on positive/negative sentiment.
-
-IMPORTANT: Return exactly one result per input, in the same order as the inputs above.
-For each input, provide:
-- has_feedback_tone: True/False
-- confidence_score: 0-1 scale
-- reasoning: Brief explanation
-
-Return a list of FeedbackConfirmation objects, one for each input in order.
-"""
+        prompt += """CRITICAL: Return exactly one FeedbackConfirmation per input, in the same order (1, 2, 3...).
+        For each input, determine if it contains feedback tone.
+        Focus on feedback detection, not sentiment analysis."""
         
         return prompt
+
+# ============================================================================
+# MAIN FEEDBACK ANALYZER
+# ============================================================================
+
+class FeedbackAnalyzer:
+    """Main feedback analysis orchestrator."""
     
-    def process_messages_optimized(self, limit=None):
-        """
-        Optimized method to process messages from database.
-        Uses preprocessing to filter potential feedback, then LLM only for confirmation.
+    def __init__(self, db_config: DatabaseConfig, analyzer_config: AnalyzerConfig):
+        self.config = analyzer_config
+        self.db_manager = DatabaseManager(db_config)
+        self.preprocessor = FeedbackPreprocessor()
+        self.cache_manager = CacheManager(
+            analyzer_config.cache_file, 
+            analyzer_config.cache_enabled
+        )
+        self.llm_client = LLMClient(analyzer_config)
         
-        Args:
-            limit: Optional limit on number of messages to process
-            
-        Returns:
-            DataFrame with analysis results
-        """
+        logger.info(f"Initialized Feedback Analyzer with:")
+        logger.info(f"  Model: {analyzer_config.model}")
+        logger.info(f"  Batch size: {analyzer_config.batch_size}")
+        logger.info(f"  Cache enabled: {analyzer_config.cache_enabled}")
+    
+    def analyze_messages(self, limit: Optional[int] = None) -> pd.DataFrame:
+        """Main method to analyze messages for feedback tone."""
+        start_time = time.time()
+        
         try:
-            start_time = time.time()
-            
-            # Fetch messages from database
-            messages_df = self.fetch_messages_from_db(limit)
-            
+            # Step 1: Fetch messages
+            messages_df = self.db_manager.fetch_messages(limit)
             if messages_df.empty:
-                logger.warning("No messages found in database")
+                logger.warning("No messages found")
                 return pd.DataFrame()
             
-            logger.info(f"Processing {len(messages_df)} messages with optimization...")
+            logger.info(f"Processing {len(messages_df)} messages")
             
-            # Step 1: Preprocess to identify potential feedback
-            potential_feedback, non_feedback = self.preprocess_for_feedback(messages_df)
+            # Step 2: Preprocess to identify potential feedback
+            potential_feedback, non_feedback = self._preprocess_messages(messages_df)
             
-            # Step 2: Process potential feedback with LLM
-            confirmed_feedback = []
-            if potential_feedback:
-                logger.info(f"Confirming {len(potential_feedback)} potential feedback messages with LLM...")
-                
-                # Process in batches
-                for batch_idx in range(0, len(potential_feedback), self.batch_size):
-                    batch = potential_feedback[batch_idx:batch_idx + self.batch_size]
-                    batch_num = batch_idx // self.batch_size + 1
-                    total_batches = (len(potential_feedback) + self.batch_size - 1) // self.batch_size
-                    
-                    # Validate and potentially reduce batch size
-                    adjusted_batch_size = self._validate_batch_size(batch)
-                    
-                    logger.info(f"Processing feedback batch {batch_num}/{total_batches} ({len(batch)} messages, adjusted batch size: {adjusted_batch_size})")
-                    
-                    # Check cache for each message in batch
-                    batch_to_confirm = []
-                    cached_results = []
-                    
-                    for msg in batch:
-                        cache_key = self._get_cache_key(msg['row_data']['input'])
-                        
-                        if cache_key in self.cache and self.cache_results:
-                            cached_results.append(self.cache[cache_key])
-                        else:
-                            batch_to_confirm.append(msg)
-                    
-                    # Confirm non-cached messages
-                    if batch_to_confirm:
-                        llm_results = self.confirm_feedback_with_llm(batch_to_confirm)
-                        
-                        # Validate results length
-                        if len(llm_results) != len(batch_to_confirm):
-                            logger.warning(f"Batch result count mismatch: expected {len(batch_to_confirm)}, got {len(llm_results)}")
-                            # Pad or truncate results to match expected count
-                            while len(llm_results) < len(batch_to_confirm):
-                                llm_results.append(FeedbackConfirmation(
-                                    has_feedback_tone=False,
-                                    confidence_score=0.0,
-                                    reasoning="Missing result from batch processing"
-                                ))
-                            llm_results = llm_results[:len(batch_to_confirm)]
-                        
-                        # Cache results
-                        for i, msg in enumerate(batch_to_confirm):
-                            cache_key = self._get_cache_key(msg['row_data']['input'])
-                            self.cache[cache_key] = llm_results[i]
-                        
-                        # Combine cached and new results
-                        confirmed_feedback.extend(cached_results + llm_results)
-                    else:
-                        confirmed_feedback.extend(cached_results)
-                    
-                    # Save cache periodically
-                    if batch_num % 10 == 0:
-                        self._save_cache()
-                    
-                    # Rate limiting
-                    if batch_num < total_batches:
-                        time.sleep(0.5)  # 0.5 second pause between batches
+            # Step 3: Analyze potential feedback with LLM
+            feedback_results = self._analyze_potential_feedback(potential_feedback)
             
-            # Step 3: Create final results
-            final_results = []
+            # Step 4: Combine results
+            final_results = self._combine_results(potential_feedback, non_feedback, feedback_results)
             
-            # Add confirmed feedback results
-            feedback_idx = 0
-            for msg in potential_feedback:
-                if feedback_idx < len(confirmed_feedback):
-                    confirmation = confirmed_feedback[feedback_idx]
-                    feedback_idx += 1
-                else:
-                    confirmation = FeedbackConfirmation(
-                        has_feedback_tone=False,
-                        confidence_score=0.0,
-                        reasoning="Not confirmed"
-                    )
-                
-                # Extract keywords for this message
-                preprocessed_text = self.preprocess_text(msg['row_data']['input'])
-                keywords = self.extract_feedback_keywords(preprocessed_text)
-                
-                result_row = {
-                    'emp_id': msg['row_data']['emp_id'],
-                    'session_id': msg['row_data']['session_id'],
-                    'input_text': msg['row_data']['input'],
-                    'chat_type': msg['row_data']['chat_type'],
-                    'timestamp': msg['row_data']['timestamp'],
-                    'has_feedback_tone': confirmation.has_feedback_tone,
-                    'confidence_score': confirmation.confidence_score,
-                    'reasoning': confirmation.reasoning,
-                    'feedback_keywords': ', '.join(keywords) if keywords else '',
-                    'keyword_count': msg['keyword_count'],
-                    'pattern_matches': msg['pattern_matches'],
-                    'feedback_score': msg['feedback_score'],
-                    'preprocessing_result': 'potential_feedback'
-                }
-                
-                final_results.append(result_row)
-            
-            # Add non-feedback results (no LLM analysis needed)
-            for msg in non_feedback:
-                preprocessed_text = self.preprocess_text(msg['row_data']['input'])
-                keywords = self.extract_feedback_keywords(preprocessed_text)
-                
-                result_row = {
-                    'emp_id': msg['row_data']['emp_id'],
-                    'session_id': msg['row_data']['session_id'],
-                    'input_text': msg['row_data']['input'],
-                    'chat_type': msg['row_data']['chat_type'],
-                    'timestamp': msg['row_data']['timestamp'],
-                    'has_feedback_tone': False,  # Preprocessing determined no feedback
-                    'confidence_score': 1.0,  # High confidence in preprocessing result
-                    'reasoning': 'Preprocessing determined no feedback tone detected',
-                    'feedback_keywords': ', '.join(keywords) if keywords else '',
-                    'keyword_count': msg['keyword_count'],
-                    'pattern_matches': msg['pattern_matches'],
-                    'feedback_score': msg['feedback_score'],
-                    'preprocessing_result': 'non_feedback'
-                }
-                
-                final_results.append(result_row)
-            
-            # Create results DataFrame
+            # Step 5: Save results
             results_df = pd.DataFrame(final_results)
+            filename = self._save_results(results_df)
             
-            # Save to CSV
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"feedback_analysis_optimized_{timestamp}.csv"
-            results_df.to_csv(filename, index=False)
-            
-            processing_time = time.time() - start_time
-            
-            logger.info(f"Optimized analysis complete in {processing_time:.2f} seconds")
-            logger.info(f"Results saved to {filename}")
-            logger.info(f"Total messages processed: {len(results_df)}")
-            logger.info(f"Messages with feedback tone: {len(results_df[results_df['has_feedback_tone'] == True])}")
-            logger.info(f"LLM calls saved: {len(non_feedback)} ({(len(non_feedback)/len(messages_df)*100):.1f}% reduction)")
-            logger.info(f"Cache hits: {len(self.cache)}")
+            # Step 6: Log summary
+            self._log_summary(results_df, start_time, len(non_feedback), filename)
             
             return results_df
             
         except Exception as e:
-            logger.error(f"Error processing messages: {str(e)}")
+            logger.error(f"Analysis failed: {e}")
             raise
-
-    def _validate_batch_size(self, messages):
-        """
-        Validate and potentially reduce batch size to prevent token limit issues.
+        finally:
+            # Always save cache
+            self.cache_manager.save_cache()
+    
+    def _preprocess_messages(self, messages_df: pd.DataFrame) -> Tuple[List[dict], List[dict]]:
+        """Preprocess messages to identify potential feedback."""
+        potential_feedback = []
+        non_feedback = []
         
-        Args:
-            messages: List of messages to process
+        for _, row in messages_df.iterrows():
+            keywords, pattern_matches, score = self.preprocessor.calculate_feedback_score(row['input'])
             
-        Returns:
-            Adjusted batch size
-        """
-        if len(messages) <= self.batch_size:
-            return len(messages)
+            message_data = {
+                'row': row,
+                'keywords': keywords,
+                'pattern_matches': pattern_matches,
+                'score': score
+            }
+            
+            if self.preprocessor.is_potential_feedback(row['input']):
+                potential_feedback.append(message_data)
+            else:
+                non_feedback.append(message_data)
         
-        # Estimate tokens for current batch
-        estimated_tokens = 0
-        for msg in messages[:self.batch_size]:
-            text = msg['row_data']['input']
-            if text and not pd.isna(text):
-                estimated_tokens += len(text.split()) * 1.3  # Rough token estimation
+        logger.info(f"Preprocessing complete:")
+        logger.info(f"  Potential feedback: {len(potential_feedback)}")
+        logger.info(f"  Non-feedback: {len(non_feedback)}")
+        logger.info(f"  LLM call reduction: {len(non_feedback)/len(messages_df)*100:.1f}%")
         
-        # Add prompt overhead
-        estimated_tokens += 500  # Base prompt tokens
+        return potential_feedback, non_feedback
+    
+    def _analyze_potential_feedback(self, potential_feedback: List[dict]) -> List[FeedbackConfirmation]:
+        """Analyze potential feedback messages with LLM."""
+        if not potential_feedback:
+            return []
         
-        # If estimated tokens > 3000, reduce batch size
-        if estimated_tokens > 3000:
-            # Calculate safe batch size
-            safe_batch_size = max(1, int(self.batch_size * (3000 / estimated_tokens)))
-            logger.warning(f"Reducing batch size from {self.batch_size} to {safe_batch_size} due to token limit concerns")
-            return safe_batch_size
+        logger.info(f"Analyzing {len(potential_feedback)} potential feedback messages with LLM")
+        all_results = []
         
-        return self.batch_size
+        # Process in batches
+        for i in range(0, len(potential_feedback), self.config.batch_size):
+            batch = potential_feedback[i:i + self.config.batch_size]
+            batch_num = i // self.config.batch_size + 1
+            total_batches = (len(potential_feedback) + self.config.batch_size - 1) // self.config.batch_size
+            
+            logger.info(f"Processing batch {batch_num}/{total_batches} ({len(batch)} messages)")
+            
+            # Check cache first
+            uncached_batch, cached_results = self._check_cache(batch)
+            
+            # Process uncached messages
+            if uncached_batch:
+                batch_data = [
+                    {
+                        'text': msg['row']['input'],
+                        'keywords': msg['keywords'],
+                        'score': msg['score']
+                    }
+                    for msg in uncached_batch
+                ]
+                
+                new_results = self.llm_client.analyze_batch_messages(batch_data)
+                
+                # Validate results
+                if len(new_results) != len(uncached_batch):
+                    logger.error(f"Result count mismatch in batch {batch_num}")
+                    # Pad missing results
+                    while len(new_results) < len(uncached_batch):
+                        new_results.append(FeedbackConfirmation(
+                            has_feedback_tone=False,
+                            confidence_score=0.0,
+                            reasoning="Missing result - batch processing error"
+                        ))
+                
+                # Cache new results
+                for msg, result in zip(uncached_batch, new_results):
+                    self.cache_manager.set(msg['row']['input'], result)
+                
+                # Merge results maintaining order
+                batch_results = []
+                cached_idx = 0
+                new_idx = 0
+                
+                for msg in batch:
+                    if any(msg is uncached_msg for uncached_msg in uncached_batch):
+                        batch_results.append(new_results[new_idx])
+                        new_idx += 1
+                    else:
+                        batch_results.append(cached_results[cached_idx])
+                        cached_idx += 1
+                
+                all_results.extend(batch_results)
+            else:
+                all_results.extend(cached_results)
+            
+            # Save cache periodically
+            if batch_num % 5 == 0:
+                self.cache_manager.save_cache()
+            
+            # Rate limiting between batches
+            if batch_num < total_batches:
+                time.sleep(0.5)
+        
+        return all_results
+    
+    def _check_cache(self, batch: List[dict]) -> Tuple[List[dict], List[FeedbackConfirmation]]:
+        """Check cache for batch messages."""
+        uncached_batch = []
+        cached_results = []
+        
+        for msg in batch:
+            cached_result = self.cache_manager.get(msg['row']['input'])
+            if cached_result:
+                cached_results.append(cached_result)
+            else:
+                uncached_batch.append(msg)
+        
+        logger.info(f"Cache stats: {len(cached_results)} cached, {len(uncached_batch)} need processing")
+        return uncached_batch, cached_results
+    
+    def _combine_results(self, potential_feedback: List[dict], 
+                        non_feedback: List[dict], 
+                        feedback_results: List[FeedbackConfirmation]) -> List[dict]:
+        """Combine all analysis results."""
+        final_results = []
+        
+        # Add confirmed feedback results
+        for i, msg in enumerate(potential_feedback):
+            if i < len(feedback_results):
+                result = feedback_results[i]
+            else:
+                result = FeedbackConfirmation(
+                    has_feedback_tone=False,
+                    confidence_score=0.0,
+                    reasoning="Missing LLM result"
+                )
+            
+            final_results.append(self._create_result_dict(msg, result, 'potential_feedback'))
+        
+        # Add non-feedback results
+        for msg in non_feedback:
+            result = FeedbackConfirmation(
+                has_feedback_tone=False,
+                confidence_score=1.0,
+                reasoning="Preprocessing: No feedback indicators detected"
+            )
+            final_results.append(self._create_result_dict(msg, result, 'non_feedback'))
+        
+        return final_results
+    
+    def _create_result_dict(self, msg_data: dict, 
+                           result: FeedbackConfirmation, 
+                           preprocessing_result: str) -> dict:
+        """Create result dictionary."""
+        return {
+            'emp_id': msg_data['row']['emp_id'],
+            'session_id': msg_data['row']['session_id'],
+            'input_text': msg_data['row']['input'],
+            'chat_type': msg_data['row']['chat_type'],
+            'timestamp': msg_data['row']['timestamp'],
+            'has_feedback_tone': result.has_feedback_tone,
+            'confidence_score': result.confidence_score,
+            'reasoning': result.reasoning,
+            'feedback_keywords': ', '.join(msg_data['keywords']),
+            'keyword_count': len(msg_data['keywords']),
+            'pattern_matches': msg_data['pattern_matches'],
+            'feedback_score': msg_data['score'],
+            'preprocessing_result': preprocessing_result
+        }
+    
+    def _save_results(self, results_df: pd.DataFrame) -> str:
+        """Save results to CSV file."""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"feedback_analysis_{timestamp}.csv"
+        results_df.to_csv(filename, index=False)
+        logger.info(f"Results saved to {filename}")
+        return filename
+    
+    def _log_summary(self, results_df: pd.DataFrame, start_time: float, 
+                    non_feedback_count: int, filename: str):
+        """Log analysis summary."""
+        processing_time = time.time() - start_time
+        feedback_count = len(results_df[results_df['has_feedback_tone'] == True])
+        
+        logger.info("=" * 60)
+        logger.info("ANALYSIS SUMMARY")
+        logger.info("=" * 60)
+        logger.info(f"Processing time: {processing_time:.2f} seconds")
+        logger.info(f"Total messages: {len(results_df)}")
+        logger.info(f"Feedback messages: {feedback_count} ({feedback_count/len(results_df)*100:.1f}%)")
+        logger.info(f"LLM calls saved: {non_feedback_count} ({non_feedback_count/len(results_df)*100:.1f}%)")
+        logger.info(f"Cache size: {len(self.cache_manager.cache)} entries")
+        logger.info(f"Results file: {filename}")
+        logger.info("=" * 60)
+
+# ============================================================================
+# MAIN ENTRY POINT
+# ============================================================================
 
 def main():
-    """Main function to run the optimized feedback analysis."""
+    """Main entry point for the feedback analyzer."""
     try:
-        # Initialize analyzer with optimized settings
-        analyzer = FeedbackAnalyzerOptimized(
-            batch_size=100,  # Process 100 messages per LLM call
-            cache_results=True,  # Enable caching
-            model="gpt-4o"  # Use GPT-4 for better accuracy
+        # Configuration - Replace with your actual values
+        db_config = DatabaseConfig(
+            host="localhost",
+            port=5432,
+            database="your_database",
+            user="your_username",
+            password="your_password"
         )
         
-        # Process messages with optimization
-        results = analyzer.process_messages_optimized(limit=1000)  # Process first 1000 messages for testing
+        analyzer_config = AnalyzerConfig(
+            openai_api_key="your_openai_api_key",  # Or use os.getenv("OPENAI_API_KEY")
+            model="gpt-4o",
+            batch_size=10,  # Smaller batches for better accuracy
+            cache_enabled=True
+        )
         
+        # Initialize and run analyzer
+        analyzer = FeedbackAnalyzer(db_config, analyzer_config)
+        results = analyzer.analyze_messages(limit=1000)  # Process first 1000 messages
+        
+        # Display results summary
         if not results.empty:
-            print(f"\nOptimized Feedback Analysis Summary:")
-            print(f"Total messages analyzed: {len(results)}")
-            print(f"Messages with feedback tone: {len(results[results['has_feedback_tone'] == True])}")
-            print(f"Preprocessing results:")
-            print(f"  - Potential feedback: {len(results[results['preprocessing_result'] == 'potential_feedback'])}")
-            print(f"  - Non-feedback: {len(results[results['preprocessing_result'] == 'non_feedback'])}")
-            print(f"Average confidence score: {results['confidence_score'].mean():.2f}")
+            feedback_count = len(results[results['has_feedback_tone'] == True])
+            print(f"\n🎯 FEEDBACK ANALYSIS COMPLETE!")
+            print(f"📊 Total messages analyzed: {len(results)}")
+            print(f"💬 Messages with feedback: {feedback_count}")
+            print(f"📈 Feedback rate: {feedback_count/len(results)*100:.1f}%")
             
-            # Show some examples
+            # Show example feedback messages
             feedback_examples = results[results['has_feedback_tone'] == True].head(3)
             if not feedback_examples.empty:
-                print(f"\nExample feedback messages:")
-                for _, row in feedback_examples.iterrows():
-                    print(f"- Confidence: {row['confidence_score']:.2f}")
-                    print(f"  Text: {row['input_text'][:100]}...")
-                    print(f"  Reasoning: {row['reasoning']}")
-                    print()
-        
+                print(f"\n📝 Example feedback messages:")
+                for i, (_, row) in enumerate(feedback_examples.iterrows(), 1):
+                    print(f"\n{i}. Confidence: {row['confidence_score']:.2f}")
+                    print(f"   Text: {row['input_text'][:100]}...")
+                    print(f"   Reason: {row['reasoning']}")
+        else:
+            print("No results generated. Check your database connection and data.")
+            
     except Exception as e:
-        print(f"Error running optimized feedback analysis: {e}")
-        print("Make sure your database is set up and OPENAI_API_KEY is configured")
+        logger.error(f"Analysis failed: {e}")
+        print(f"❌ Error: {e}")
+        print("💡 Make sure to:")
+        print("  - Set up your database connection")
+        print("  - Configure your OpenAI API key")
+        print("  - Install required packages: pip install openai instructor psycopg2-binary pandas")
 
 if __name__ == "__main__":
-    main() 
+    main()
