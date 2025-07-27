@@ -264,6 +264,10 @@ class SystemFeedbackCacheManager:
         self.cache_file = cache_file
         self.enabled = enabled
         self.cache: Dict[str, SystemFeedbackConfirmation] = self._load_cache()
+        
+        # Try to migrate old cache format if we have any cache entries
+        if self.cache:
+            self.migrate_old_cache()
     
     def _load_cache(self) -> Dict[str, SystemFeedbackConfirmation]:
         """Load cache from file."""
@@ -279,9 +283,22 @@ class SystemFeedbackCacheManager:
                     if isinstance(value, dict):
                         # Handle old cache format that might contain batch results
                         if 'results' in value:
-                            # This is old batch format, skip it
-                            logger.warning(f"Skipping old batch format cache entry for key: {key}")
-                            continue
+                            # This is old batch format, try to extract individual results
+                            logger.info(f"Converting old batch format cache entry for key: {key}")
+                            try:
+                                # Extract the first result from the batch (assuming single message was cached)
+                                if value['results'] and len(value['results']) > 0:
+                                    first_result = value['results'][0]
+                                    if isinstance(first_result, dict):
+                                        converted_cache[key] = SystemFeedbackConfirmation(**first_result)
+                                    else:
+                                        converted_cache[key] = first_result
+                                    logger.info(f"Successfully converted batch result to individual result for key: {key}")
+                                else:
+                                    logger.warning(f"Empty results array in batch format for key: {key}")
+                            except Exception as e:
+                                logger.warning(f"Could not convert batch result for key {key}: {e}")
+                                continue
                         else:
                             # This is individual result format
                             try:
@@ -346,6 +363,34 @@ class SystemFeedbackCacheManager:
             except Exception as e:
                 logger.error(f"Could not clear cache file: {e}")
         self.cache = {}
+    
+    def migrate_old_cache(self):
+        """Migrate old cache format to new format."""
+        if not os.path.exists(self.cache_file):
+            return
+        
+        try:
+            with open(self.cache_file, 'rb') as f:
+                old_cache_data = pickle.load(f)
+            
+            migrated_count = 0
+            for key, value in old_cache_data.items():
+                if isinstance(value, dict) and 'results' in value:
+                    # This is old batch format, try to extract individual results
+                    if value['results'] and len(value['results']) > 0:
+                        # For now, we'll use the first result
+                        # In the future, we could create multiple cache entries
+                        first_result = value['results'][0]
+                        if isinstance(first_result, dict):
+                            self.cache[key] = SystemFeedbackConfirmation(**first_result)
+                            migrated_count += 1
+            
+            if migrated_count > 0:
+                logger.info(f"Migrated {migrated_count} old batch cache entries to individual format")
+                self.save_cache()
+                
+        except Exception as e:
+            logger.error(f"Could not migrate old cache: {e}")
 
 # ============================================================================
 # DATABASE MANAGER (Same as before)
