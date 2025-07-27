@@ -600,12 +600,20 @@ class ImprovedSystemFeedbackAnalyzer:
         processing_time = time.time() - start_time
         system_feedback_count = len(results_df[results_df['has_system_feedback'] == True])
         
+        # Count different types of results
+        content_filtered_count = len(results_df[results_df['feedback_type'] == 'content_filtered'])
+        error_count = len(results_df[results_df['feedback_type'] == 'error'])
+        non_system_count = len(results_df[results_df['feedback_type'] == 'non_system'])
+        
         logger.info("=" * 60)
         logger.info("SYSTEM FEEDBACK ANALYSIS SUMMARY")
         logger.info("=" * 60)
         logger.info(f"Processing time: {processing_time:.2f} seconds")
         logger.info(f"Total messages: {len(results_df)}")
         logger.info(f"System feedback messages: {system_feedback_count} ({system_feedback_count/len(results_df)*100:.1f}%)")
+        logger.info(f"Content filtered messages: {content_filtered_count} ({content_filtered_count/len(results_df)*100:.1f}%)")
+        logger.info(f"Error messages: {error_count} ({error_count/len(results_df)*100:.1f}%)")
+        logger.info(f"Non-system messages: {non_system_count} ({non_system_count/len(results_df)*100:.1f}%)")
         logger.info(f"LLM calls saved: {non_system_feedback_count} ({non_system_feedback_count/len(results_df)*100:.1f}%)")
         logger.info(f"Cache size: {len(self.cache_manager.cache)} entries")
         logger.info(f"Results file: {filename}")

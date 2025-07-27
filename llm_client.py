@@ -95,13 +95,38 @@ class GenericLLMClient:
                 )
                 return response
             
-            except Exception as e:
-                logger.error(f"Error analyzing single message (attempt {attempt + 1}): {e}")
+            except openai.BadRequestError as e:
+                # Handle content filtering errors (400)
+                if "content_filter" in str(e).lower() or "400" in str(e):
+                    logger.warning(f"Content filtering error (attempt {attempt + 1}): {e}")
+                    return self._create_content_filtered_response(response_model, text)
+                else:
+                    logger.error(f"Bad request error (attempt {attempt + 1}): {e}")
+                    if attempt < self.config.max_retries - 1:
+                        time.sleep(self.config.retry_delay * (attempt + 1))
+                    else:
+                        return self._create_error_response(response_model, f"Bad request: {str(e)}")
+            
+            except openai.RateLimitError as e:
+                logger.warning(f"Rate limit error (attempt {attempt + 1}): {e}")
+                if attempt < self.config.max_retries - 1:
+                    time.sleep(self.config.retry_delay * (attempt + 1) * 2)  # Longer delay for rate limits
+                else:
+                    return self._create_error_response(response_model, f"Rate limit exceeded: {str(e)}")
+            
+            except openai.APIError as e:
+                logger.error(f"API error (attempt {attempt + 1}): {e}")
                 if attempt < self.config.max_retries - 1:
                     time.sleep(self.config.retry_delay * (attempt + 1))
                 else:
-                    # Return default error response
-                    return self._create_error_response(response_model, str(e))
+                    return self._create_error_response(response_model, f"API error: {str(e)}")
+            
+            except Exception as e:
+                logger.error(f"Unexpected error analyzing single message (attempt {attempt + 1}): {e}")
+                if attempt < self.config.max_retries - 1:
+                    time.sleep(self.config.retry_delay * (attempt + 1))
+                else:
+                    return self._create_error_response(response_model, f"Unexpected error: {str(e)}")
     
     def analyze_batch_messages(self, 
                               messages_data: List[dict], 
@@ -142,8 +167,34 @@ class GenericLLMClient:
                 
                 return response.results if hasattr(response, 'results') else [response]
             
+            except openai.BadRequestError as e:
+                # Handle content filtering errors (400) in batch
+                if "content_filter" in str(e).lower() or "400" in str(e):
+                    logger.warning(f"Content filtering error in batch (attempt {attempt + 1}): {e}")
+                    return self._create_content_filtered_batch_response(messages_data, response_model)
+                else:
+                    logger.error(f"Bad request error in batch (attempt {attempt + 1}): {e}")
+                    if attempt < self.config.max_retries - 1:
+                        time.sleep(self.config.retry_delay * (attempt + 1))
+                    else:
+                        return self._fallback_to_individual(messages_data, response_model)
+            
+            except openai.RateLimitError as e:
+                logger.warning(f"Rate limit error in batch (attempt {attempt + 1}): {e}")
+                if attempt < self.config.max_retries - 1:
+                    time.sleep(self.config.retry_delay * (attempt + 1) * 2)  # Longer delay for rate limits
+                else:
+                    return self._fallback_to_individual(messages_data, response_model)
+            
+            except openai.APIError as e:
+                logger.error(f"API error in batch (attempt {attempt + 1}): {e}")
+                if attempt < self.config.max_retries - 1:
+                    time.sleep(self.config.retry_delay * (attempt + 1))
+                else:
+                    return self._fallback_to_individual(messages_data, response_model)
+            
             except Exception as e:
-                logger.error(f"Batch analysis failed (attempt {attempt + 1}): {e}")
+                logger.error(f"Unexpected error in batch analysis (attempt {attempt + 1}): {e}")
                 if attempt < self.config.max_retries - 1:
                     time.sleep(self.config.retry_delay * (attempt + 1))
                 else:
@@ -190,6 +241,40 @@ class GenericLLMClient:
         except Exception:
             # If we can't create a proper error response, return None
             return None
+    
+    def _create_content_filtered_response(self, response_model: BaseModel, text: str) -> BaseModel:
+        """Create a response for content that was filtered by the API."""
+        try:
+            if hasattr(response_model, 'has_system_feedback'):
+                return response_model(
+                    has_system_feedback=False,
+                    confidence_score=0.0,
+                    reasoning="Content filtered by API - unable to analyze",
+                    feedback_type="content_filtered"
+                )
+            elif hasattr(response_model, 'has_feedback_tone'):
+                return response_model(
+                    has_feedback_tone=False,
+                    confidence_score=0.0,
+                    reasoning="Content filtered by API - unable to analyze"
+                )
+            else:
+                return response_model()
+        except Exception:
+            return None
+    
+    def _create_content_filtered_batch_response(self, messages_data: List[dict], response_model: BaseModel) -> List[BaseModel]:
+        """Create batch response for content that was filtered by the API."""
+        results = []
+        for msg_data in messages_data:
+            result = self._create_content_filtered_response(response_model, msg_data['text'])
+            if result:
+                results.append(result)
+            else:
+                # Fallback error response
+                results.append(self._create_error_response(response_model, "Content filtered"))
+        
+        return results
     
     def _get_system_prompt(self) -> str:
         """Get system prompt for feedback analysis."""
