@@ -171,6 +171,7 @@ class GenericLLMClient:
                 # Handle content filtering errors (400) in batch
                 if "content_filter" in str(e).lower() or "400" in str(e):
                     logger.warning(f"Content filtering error in batch (attempt {attempt + 1}): {e}")
+                    logger.info(f"Skipping batch of {len(messages_data)} messages due to content filtering")
                     return self._create_content_filtered_batch_response(messages_data, response_model)
                 else:
                     logger.error(f"Bad request error in batch (attempt {attempt + 1}): {e}")
@@ -265,6 +266,8 @@ class GenericLLMClient:
     
     def _create_content_filtered_batch_response(self, messages_data: List[dict], response_model: BaseModel) -> List[BaseModel]:
         """Create batch response for content that was filtered by the API."""
+        logger.info(f"Creating content filtered responses for batch of {len(messages_data)} messages")
+        
         results = []
         for msg_data in messages_data:
             result = self._create_content_filtered_response(response_model, msg_data['text'])
