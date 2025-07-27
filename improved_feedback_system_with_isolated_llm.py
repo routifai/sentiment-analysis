@@ -8,12 +8,24 @@ import hashlib
 import os
 import time
 from typing import List, Dict, Tuple, Optional
-from pydantic import BaseModel
 from datetime import datetime
 from dataclasses import dataclass
 
 # Import the isolated LLM client
 from llm_client import GenericLLMClient, LLMConfig, create_openai_client, create_custom_client, create_client_from_env
+# Define models here to avoid pickle warnings
+from pydantic import BaseModel
+
+class SystemFeedbackConfirmation(BaseModel):
+    """Model for system feedback confirmation results."""
+    has_system_feedback: bool
+    confidence_score: float
+    reasoning: str
+    feedback_type: str = "general"  # system, response, accuracy, content_filtered, error
+
+class BatchSystemFeedbackConfirmation(BaseModel):
+    """Model for batch system feedback confirmation results."""
+    results: List[SystemFeedbackConfirmation]
 
 # Configure logging
 logging.basicConfig(
@@ -46,17 +58,6 @@ class AnalyzerConfig:
 # ============================================================================
 # PYDANTIC MODELS
 # ============================================================================
-
-class SystemFeedbackConfirmation(BaseModel):
-    """Model for system feedback confirmation results."""
-    has_system_feedback: bool
-    confidence_score: float
-    reasoning: str
-    feedback_type: str = "general"  # system, response, accuracy, etc.
-
-class BatchSystemFeedbackConfirmation(BaseModel):
-    """Model for batch system feedback confirmation results."""
-    results: List[SystemFeedbackConfirmation]
 
 # ============================================================================
 # PREPROCESSOR (Same as before)
@@ -271,7 +272,15 @@ class SystemFeedbackCacheManager:
         
         try:
             with open(self.cache_file, 'rb') as f:
-                return pickle.load(f)
+                cached_data = pickle.load(f)
+                # Convert cached dictionaries back to SystemFeedbackConfirmation objects
+                converted_cache = {}
+                for key, value in cached_data.items():
+                    if isinstance(value, dict):
+                        converted_cache[key] = SystemFeedbackConfirmation(**value)
+                    else:
+                        converted_cache[key] = value
+                return converted_cache
         except Exception as e:
             logger.warning(f"Could not load cache: {e}")
             return {}
@@ -282,8 +291,16 @@ class SystemFeedbackCacheManager:
             return
         
         try:
+            # Convert SystemFeedbackConfirmation objects to dictionaries for pickling
+            cache_dict = {}
+            for key, value in self.cache.items():
+                if hasattr(value, 'model_dump'):
+                    cache_dict[key] = value.model_dump()
+                else:
+                    cache_dict[key] = value
+            
             with open(self.cache_file, 'wb') as f:
-                pickle.dump(self.cache, f)
+                pickle.dump(cache_dict, f)
         except Exception as e:
             logger.warning(f"Could not save cache: {e}")
     
