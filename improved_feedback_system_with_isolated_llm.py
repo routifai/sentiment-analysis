@@ -277,7 +277,18 @@ class SystemFeedbackCacheManager:
                 converted_cache = {}
                 for key, value in cached_data.items():
                     if isinstance(value, dict):
-                        converted_cache[key] = SystemFeedbackConfirmation(**value)
+                        # Handle old cache format that might contain batch results
+                        if 'results' in value:
+                            # This is old batch format, skip it
+                            logger.warning(f"Skipping old batch format cache entry for key: {key}")
+                            continue
+                        else:
+                            # This is individual result format
+                            try:
+                                converted_cache[key] = SystemFeedbackConfirmation(**value)
+                            except Exception as e:
+                                logger.warning(f"Could not convert cache entry for key {key}: {e}")
+                                continue
                     else:
                         converted_cache[key] = value
                 return converted_cache
@@ -325,6 +336,16 @@ class SystemFeedbackCacheManager:
         
         key = self.get_cache_key(text)
         self.cache[key] = result
+    
+    def clear_cache(self):
+        """Clear the cache file."""
+        if os.path.exists(self.cache_file):
+            try:
+                os.remove(self.cache_file)
+                logger.info(f"Cache file {self.cache_file} cleared")
+            except Exception as e:
+                logger.error(f"Could not clear cache file: {e}")
+        self.cache = {}
 
 # ============================================================================
 # DATABASE MANAGER (Same as before)
