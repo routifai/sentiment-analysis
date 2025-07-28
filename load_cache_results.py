@@ -7,6 +7,7 @@ This allows you to use your cached results without running the full analysis aga
 import pickle
 import pandas as pd
 import logging
+import hashlib
 from datetime import datetime
 from typing import Dict, Any
 
@@ -71,6 +72,7 @@ def load_cache_results_with_text(cache_file: str = "system_feedback_cache.pkl"):
                     first_result = value['results'][0]
                     if isinstance(first_result, dict):
                         results.append({
+                            'cache_key': key,
                             'original_text': key,  # The cache key is the original text
                             'has_system_feedback': first_result.get('has_system_feedback', False),
                             'confidence_score': first_result.get('confidence_score', 0.0),
@@ -80,6 +82,7 @@ def load_cache_results_with_text(cache_file: str = "system_feedback_cache.pkl"):
                 else:
                     # Handle individual format
                     results.append({
+                        'cache_key': key,
                         'original_text': key,  # The cache key is the original text
                         'has_system_feedback': value.get('has_system_feedback', False),
                         'confidence_score': value.get('confidence_score', 0.0),
@@ -92,6 +95,69 @@ def load_cache_results_with_text(cache_file: str = "system_feedback_cache.pkl"):
         
     except Exception as e:
         logger.error(f"Could not load cache: {e}")
+        return pd.DataFrame()
+
+def get_cache_key(text: str) -> str:
+    """Generate cache key for text (same as in the original system)."""
+    if not text or pd.isna(text):
+        text = "EMPTY_INPUT"
+    return hashlib.md5(f"{text}:{len(text)}".encode()).hexdigest()
+
+def load_database_and_merge_with_cache(cache_file: str = "system_feedback_cache.pkl", 
+                                     db_config: Dict[str, Any] = None):
+    """Load database data and merge with cache results."""
+    try:
+        # Load cache first
+        cache_df = load_cache_results_with_text(cache_file)
+        if cache_df.empty:
+            logger.error("No cache data found")
+            return pd.DataFrame()
+        
+        # Load database data
+        if db_config is None:
+            logger.error("Database configuration required")
+            return cache_df
+        
+        import psycopg2
+        
+        # Connect to database
+        conn = psycopg2.connect(
+            host=db_config['host'],
+            port=db_config['port'],
+            database=db_config['database'],
+            user=db_config['user'],
+            password=db_config['password']
+        )
+        
+        # Fetch all messages
+        query = """
+            SELECT emp_id, session_id, input, output, chat_type, timestamp
+            FROM chat_messages
+            ORDER BY timestamp DESC
+        """
+        
+        db_df = pd.read_sql_query(query, conn)
+        conn.close()
+        
+        logger.info(f"Loaded {len(db_df)} messages from database")
+        
+        # Create cache key for each database message
+        db_df['cache_key'] = db_df['input'].apply(get_cache_key)
+        
+        # Merge cache results with database data
+        merged_df = db_df.merge(cache_df, on='cache_key', how='left')
+        
+        # Fill missing cache results with default values
+        merged_df['has_system_feedback'] = merged_df['has_system_feedback'].fillna(False)
+        merged_df['confidence_score'] = merged_df['confidence_score'].fillna(0.0)
+        merged_df['reasoning'] = merged_df['reasoning'].fillna('No cache result')
+        merged_df['feedback_type'] = merged_df['feedback_type'].fillna('no_cache')
+        
+        logger.info(f"Merged {len(merged_df)} messages with cache data")
+        return merged_df
+        
+    except Exception as e:
+        logger.error(f"Could not load database and merge with cache: {e}")
         return pd.DataFrame()
 
 def analyze_cache_results(df: pd.DataFrame):
@@ -155,8 +221,11 @@ def save_feedback_only_results(df: pd.DataFrame, filename: str = None):
         return
     
     # Select only relevant columns (excluding emp_id)
-    columns_to_keep = ['original_text', 'has_system_feedback', 'confidence_score', 'reasoning', 'feedback_type']
-    feedback_df = feedback_df[columns_to_keep]
+    columns_to_keep = ['emp_id', 'session_id', 'input', 'output', 'chat_type', 'timestamp', 
+                       'has_system_feedback', 'confidence_score', 'reasoning', 'feedback_type']
+    # Only include columns that exist in the dataframe
+    available_columns = [col for col in columns_to_keep if col in feedback_df.columns]
+    feedback_df = feedback_df[available_columns]
     
     if filename is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -170,11 +239,21 @@ def main():
     """Main function to load and analyze cache results."""
     print("🔄 Loading cache results...")
     
-    # Load cache results with text
-    df = load_cache_results_with_text()
+    # Try to load with database merge first
+    db_config = {
+        'host': 'localhost',
+        'port': 5432,
+        'database': 'your_database',
+        'user': 'your_username',
+        'password': 'your_password'
+    }
+    
+    # Load cache results with database merge
+    df = load_database_and_merge_with_cache(db_config=db_config)
     
     if df.empty:
         print("❌ No cache results found or cache is empty")
+        print("💡 Try updating the database configuration in the script")
         return
     
     # Analyze results
@@ -198,7 +277,9 @@ def main():
         for i, (_, row) in enumerate(system_feedback_examples.iterrows(), 1):
             print(f"\n{i}. Confidence: {row['confidence_score']:.2f}")
             print(f"   Type: {row['feedback_type']}")
-            print(f"   Text: {row['original_text'][:100]}...")
+            if 'emp_id' in row:
+                print(f"   Emp ID: {row['emp_id']}")
+            print(f"   Text: {row['input'][:100]}...")
             print(f"   Reason: {row['reasoning'][:100]}...")
 
 if __name__ == "__main__":
