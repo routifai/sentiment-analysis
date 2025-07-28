@@ -332,25 +332,25 @@ class RefinedSystemFeedbackPreprocessor:
         
         score = 0.0
         
-        # Positive indicators (feedback signals)
-        score += len(temporal_signals) * 3.0        # Strong indicator
-        score += len(evaluation_signals) * 2.5      # Strong indicator  
-        score += len(reference_signals) * 2.0       # Medium indicator
-        score += pronoun_analysis['feedback_pronoun_count'] * 1.5
-        score += tense_analysis['past_tense_count'] * 1.0
-        score += sentiment_analysis['total_evaluation'] * 2.0
-        score += context_analysis['previous_references'] * 1.5
+        # Positive indicators (feedback signals) - MORE CONSERVATIVE
+        score += len(temporal_signals) * 2.5        # Reduced from 3.0
+        score += len(evaluation_signals) * 2.0      # Reduced from 2.5
+        score += len(reference_signals) * 1.5       # Reduced from 2.0
+        score += pronoun_analysis['feedback_pronoun_count'] * 1.0  # Reduced from 1.5
+        score += tense_analysis['past_tense_count'] * 0.8  # Reduced from 1.0
+        score += sentiment_analysis['total_evaluation'] * 1.5  # Reduced from 2.0
+        score += context_analysis['previous_references'] * 1.0  # Reduced from 1.5
         
-        # Negative indicators (instruction signals)
-        score -= len(instruction_signals) * 2.0     # Strong negative
-        score -= pronoun_analysis['instruction_pronoun_count'] * 1.5
-        score -= tense_analysis['future_tense_count'] * 1.0
+        # Negative indicators (instruction signals) - MORE PENALTY
+        score -= len(instruction_signals) * 3.0     # Increased penalty from 2.0
+        score -= pronoun_analysis['instruction_pronoun_count'] * 2.0  # Increased from 1.5
+        score -= tense_analysis['future_tense_count'] * 1.5  # Increased from 1.0
         
-        # Ratio bonuses (when feedback signals dominate)
-        if pronoun_analysis['pronoun_ratio'] > 1.5:
-            score += 2.0
-        if tense_analysis['tense_ratio'] > 1.5:
-            score += 2.0
+        # Stricter ratio bonuses
+        if pronoun_analysis['pronoun_ratio'] > 2.0:  # Increased from 1.5
+            score += 1.5  # Reduced from 2.0
+        if tense_analysis['tense_ratio'] > 2.0:  # Increased from 1.5
+            score += 1.5  # Reduced from 2.0
         
         return max(0.0, score)  # Ensure non-negative
     
@@ -365,43 +365,43 @@ class RefinedSystemFeedbackPreprocessor:
         if feedback_strength == 0 and instruction_strength == 0:
             return 0.1  # Very low confidence for ambiguous text
         
-        # High confidence when signals are clear and consistent
-        if feedback_strength >= 3 and instruction_strength == 0:
+        # Stricter high confidence requirements
+        if feedback_strength >= 4 and instruction_strength == 0:  # Increased from 3
             return 0.95
-        if instruction_strength >= 2 and feedback_strength == 0:
+        if instruction_strength >= 3 and feedback_strength == 0:  # Increased from 2
             return 0.9
         
-        # Medium confidence for mixed signals
+        # More conservative medium confidence
         if feedback_strength > instruction_strength:
-            return 0.7 + min(0.2, (feedback_strength - instruction_strength) * 0.1)
+            return 0.6 + min(0.2, (feedback_strength - instruction_strength) * 0.08)  # Reduced from 0.7
         elif instruction_strength > feedback_strength:
-            return 0.6 + min(0.2, (instruction_strength - feedback_strength) * 0.1)
+            return 0.5 + min(0.2, (instruction_strength - feedback_strength) * 0.08)  # Reduced from 0.6
         else:
-            return 0.5  # Equal signals = uncertain
+            return 0.4  # Reduced from 0.5 for equal signals
     
     def is_potential_system_feedback(self, text: str) -> bool:
         """Determine if text is potential system feedback with nuanced analysis."""
         signals = self.analyze_feedback_signals(text)
         
-        # Multi-criteria decision
+        # STRICTER Multi-criteria decision
         criteria = {
-            'has_strong_feedback_signals': signals.score >= 4.0,
-            'has_temporal_indicators': len(signals.temporal_signals) >= 1,
-            'has_evaluation_language': len(signals.evaluation_signals) >= 1,
-            'low_instruction_signals': len(signals.instruction_signals) <= 1,
-            'high_confidence': signals.confidence >= 0.7
+            'has_strong_feedback_signals': signals.score >= 6.0,  # Increased from 4.0
+            'has_temporal_indicators': len(signals.temporal_signals) >= 2,  # Increased from 1
+            'has_evaluation_language': len(signals.evaluation_signals) >= 2,  # Increased from 1
+            'no_instruction_signals': len(signals.instruction_signals) == 0,  # Stricter: must be 0
+            'high_confidence': signals.confidence >= 0.8  # Increased from 0.7
         }
         
-        # Flexible scoring: need multiple criteria but not all
+        # Stricter scoring: need more criteria to pass
         criteria_met = sum(criteria.values())
         
-        # Different thresholds based on confidence
+        # Much stricter thresholds
         if signals.confidence >= 0.9:
-            return criteria_met >= 2  # High confidence = lower threshold
-        elif signals.confidence >= 0.7:
-            return criteria_met >= 3  # Medium confidence = medium threshold
+            return criteria_met >= 4  # Increased from 2
+        elif signals.confidence >= 0.8:
+            return criteria_met >= 4  # Increased from 3
         else:
-            return criteria_met >= 4  # Low confidence = higher threshold
+            return criteria_met >= 5  # Increased from 4 (all criteria must be met)
     
     def get_classification_reasoning(self, text: str) -> Dict[str, any]:
         """Get detailed reasoning for classification decision."""
