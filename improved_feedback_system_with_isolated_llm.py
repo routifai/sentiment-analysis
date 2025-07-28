@@ -1844,9 +1844,7 @@ def main(months_back: Optional[int] = None):
         print("  ✓ Database connection configured")
         print("  ✓ OpenAI API key set")
         print("  ✓ Required packages installed")
-        print("  ✓ months_back parameter is valid integer")_target_rate=0.40,           # Refine to ~40% of stage 1
-            uncertain_threshold=0.3
-        )
+        print("  ✓ months_back parameter is valid integer")
         
         # Log time-based analysis parameters
         if months_back:
