@@ -52,12 +52,13 @@ class DatabaseConfig:
 
 @dataclass
 class AnalyzerConfig:
-    """Analyzer configuration."""
+    """Analyzer configuration with periodic cache saving."""
     llm_client: GenericLLMClient
     batch_size: int = 10
     parallel_batches: int = 5  # Number of batches to process in parallel
     cache_enabled: bool = True
     cache_file: str = "refined_system_feedback_cache.pkl"
+    cache_save_frequency: int = 10  # Save cache after every N new entries
     max_retries: int = 3
     retry_delay: float = 1.0
 
@@ -73,7 +74,7 @@ class FeedbackSignals:
     confidence: float
 
 # ============================================================================
-# REFINED PREPROCESSOR
+# REFINED PREPROCESSOR (unchanged)
 # ============================================================================
 
 class RefinedSystemFeedbackPreprocessor:
@@ -383,6 +384,9 @@ class RefinedSystemFeedbackPreprocessor:
         """Determine if text is potential system feedback with nuanced analysis."""
         signals = self.analyze_feedback_signals(text)
         
+        # REJECT if score is too high (indicates long/complex prompt, not feedback)
+        if signals.score > 12.0:  # Maximum threshold for feedback-like messages
+            return False
         # STRICTER Multi-criteria decision
         criteria = {
             'has_strong_feedback_signals': signals.score >= 6.0,  # Increased from 4.0
@@ -436,28 +440,34 @@ class RefinedSystemFeedbackPreprocessor:
         else:
             if signals.instruction_signals:
                 return f"Classified as instruction because it contains {len(signals.instruction_signals)} instruction patterns (confidence: {signals.confidence:.2f})"
+            elif signals.score > 12.0:
+                return f"Classified as non-feedback due to excessively high score (score: {signals.score:.1f}), likely a long/complex prompt rather than feedback"
             elif signals.score < 2.0:
                 return f"Classified as non-feedback due to insufficient feedback signals (score: {signals.score:.1f}, confidence: {signals.confidence:.2f})"
             else:
                 return f"Classified as ambiguous/non-feedback (score: {signals.score:.1f}, confidence: {signals.confidence:.2f})"
 
 # ============================================================================
-# IMPROVED CACHE MANAGER WITH ERROR HANDLING
+# IMPROVED CACHE MANAGER WITH PERIODIC SAVING
 # ============================================================================
 
 class ImprovedCacheManager:
-    """Enhanced cache manager with better error handling and recovery."""
+    """Enhanced cache manager with periodic saving and better error handling."""
     
-    def __init__(self, cache_file: str, enabled: bool = True):
+    def __init__(self, cache_file: str, enabled: bool = True, save_frequency: int = 10):
         self.cache_file = cache_file
         self.enabled = enabled
+        self.save_frequency = save_frequency  # Save after every N new entries
         self.cache: Dict[str, SystemFeedbackConfirmation] = self._load_cache()
         self.cache_hits = 0
         self.cache_misses = 0
+        self.unsaved_entries = 0  # Track entries that haven't been saved yet
+        self.total_entries_processed = 0
         
     def _load_cache(self) -> Dict[str, SystemFeedbackConfirmation]:
         """Load cache from file with error recovery."""
         if not self.enabled or not os.path.exists(self.cache_file):
+            logger.info(f"No existing cache file found at {self.cache_file}")
             return {}
         
         try:
@@ -484,16 +494,20 @@ class ImprovedCacheManager:
                         logger.warning(f"Could not convert cache entry for key {key}: {e}")
                         continue
                 
-                logger.info(f"Loaded {len(converted_cache)} entries from cache")
+                logger.info(f"💾 CACHE LOADED: {len(converted_cache)} entries from {self.cache_file}")
                 return converted_cache
                 
         except Exception as e:
             logger.warning(f"Could not load cache: {e}. Starting with empty cache.")
             return {}
     
-    def save_cache(self):
-        """Save cache to file with error handling."""
+    def save_cache(self, force: bool = False, reason: str = "manual"):
+        """Save cache to file with periodic saving logic."""
         if not self.enabled:
+            return
+        
+        # Only save if we have unsaved entries or if forced
+        if not force and self.unsaved_entries == 0:
             return
         
         try:
@@ -517,7 +531,9 @@ class ImprovedCacheManager:
                 pickle.dump(cache_dict, f)
             
             os.replace(temp_file, self.cache_file)
-            logger.info(f"💾 Cache saved: {len(cache_dict)} entries to {self.cache_file}")  # Enhanced logging
+            
+            logger.info(f"💾 CACHE SAVED ({reason}): {len(cache_dict)} total entries, {self.unsaved_entries} new entries saved to {self.cache_file}")
+            self.unsaved_entries = 0  # Reset unsaved counter
             
         except Exception as e:
             logger.warning(f"Could not save cache: {e}")
@@ -538,15 +554,15 @@ class ImprovedCacheManager:
         
         if result:
             self.cache_hits += 1
-            logger.debug(f"Cache HIT for text: {text[:50]}...")  # Add detailed hit logging
+            logger.debug(f"✅ Cache HIT for text: {text[:50]}...")
         else:
             self.cache_misses += 1
-            logger.debug(f"Cache MISS for text: {text[:50]}...")  # Add detailed miss logging
+            logger.debug(f"🔄 Cache MISS for text: {text[:50]}...")
             
         return result
     
     def set(self, text: str, result: SystemFeedbackConfirmation):
-        """Cache result with validation."""
+        """Cache result with periodic saving."""
         if not self.enabled or not result:
             return
         
@@ -557,7 +573,17 @@ class ImprovedCacheManager:
                 return
             
             key = self.get_cache_key(text)
+            
+            # Only increment if this is a new entry
+            if key not in self.cache:
+                self.unsaved_entries += 1
+                self.total_entries_processed += 1
+            
             self.cache[key] = result
+            
+            # Periodic save based on unsaved entries
+            if self.unsaved_entries >= self.save_frequency:
+                self.save_cache(reason=f"periodic save ({self.save_frequency} new entries)")
             
         except Exception as e:
             logger.warning(f"Could not cache result for text '{text[:50]}...': {e}")
@@ -572,11 +598,14 @@ class ImprovedCacheManager:
             'cache_hits': self.cache_hits,
             'cache_misses': self.cache_misses,
             'hit_rate': hit_rate,
-            'total_requests': total_requests
+            'total_requests': total_requests,
+            'unsaved_entries': self.unsaved_entries,
+            'total_entries_processed': self.total_entries_processed,
+            'save_frequency': self.save_frequency
         }
 
 # ============================================================================
-# DATABASE MANAGER (Same as before)
+# DATABASE MANAGER (unchanged)
 # ============================================================================
 
 class DatabaseManager:
@@ -618,11 +647,11 @@ class DatabaseManager:
             return df
 
 # ============================================================================
-# PARALLEL BATCH PROCESSOR
+# PARALLEL BATCH PROCESSOR WITH IMPROVED CACHE INTEGRATION
 # ============================================================================
 
 class ParallelBatchProcessor:
-    """Handles parallel processing of multiple batches."""
+    """Handles parallel processing of multiple batches with better cache integration."""
     
     def __init__(self, llm_client: GenericLLMClient, max_workers: int = 5, max_retries: int = 3):
         self.llm_client = llm_client
@@ -636,12 +665,13 @@ class ParallelBatchProcessor:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.executor.shutdown(wait=True)
     
-    def process_batch_with_retry(self, batch_data: List[dict], batch_id: int) -> Tuple[int, List[SystemFeedbackConfirmation]]:
-        """Process a single batch with retry logic."""
+    def process_batch_with_retry(self, batch_data: List[dict], batch_id: int, 
+                               cache_manager: ImprovedCacheManager) -> Tuple[int, List[SystemFeedbackConfirmation]]:
+        """Process a single batch with retry logic and immediate caching."""
         
         for attempt in range(self.max_retries + 1):
             try:
-                logger.info(f"Processing batch {batch_id} (attempt {attempt + 1})")
+                logger.info(f"🔄 Processing batch {batch_id} (attempt {attempt + 1}, {len(batch_data)} messages)")
                 
                 # Create improved prompt
                 prompt = self._create_improved_prompt(batch_data)
@@ -698,18 +728,25 @@ class ParallelBatchProcessor:
                         feedback_type="error"
                     ))
                 
-                logger.info(f"Successfully processed batch {batch_id} with {len(results)} results")
+                # IMMEDIATELY cache all results from this batch
+                for i, result in enumerate(results[:len(batch_data)]):
+                    if i < len(batch_data):
+                        text = batch_data[i]['text']
+                        cache_manager.set(text, result)
+                        logger.debug(f"💾 Cached result for batch {batch_id}, message {i+1}")
+                
+                logger.info(f"✅ Successfully processed batch {batch_id} with {len(results)} results and cached immediately")
                 return batch_id, results[:len(batch_data)]  # Ensure exact match
                 
             except Exception as e:
-                logger.warning(f"Batch {batch_id} attempt {attempt + 1} failed: {e}")
+                logger.warning(f"❌ Batch {batch_id} attempt {attempt + 1} failed: {e}")
                 
                 if attempt < self.max_retries:
                     wait_time = (attempt + 1) * 2  # Exponential backoff
-                    logger.info(f"Retrying batch {batch_id} in {wait_time} seconds...")
+                    logger.info(f"⏳ Retrying batch {batch_id} in {wait_time} seconds...")
                     time.sleep(wait_time)
                 else:
-                    logger.error(f"Batch {batch_id} failed after {self.max_retries + 1} attempts")
+                    logger.error(f"💥 Batch {batch_id} failed after {self.max_retries + 1} attempts")
                     # Return fallback results
                     fallback_results = [
                         SystemFeedbackConfirmation(
@@ -792,15 +829,16 @@ Messages to analyze:
         
         return prompt
     
-    def process_batches_parallel(self, all_batches: List[List[dict]]) -> List[List[SystemFeedbackConfirmation]]:
-        """Process multiple batches in parallel."""
+    def process_batches_parallel(self, all_batches: List[List[dict]], 
+                               cache_manager: ImprovedCacheManager) -> List[List[SystemFeedbackConfirmation]]:
+        """Process multiple batches in parallel with immediate caching."""
         
-        logger.info(f"Processing {len(all_batches)} batches in parallel (max {self.max_workers} workers)")
+        logger.info(f"🚀 Processing {len(all_batches)} batches in parallel (max {self.max_workers} workers)")
         
         # Submit all batches to executor
         future_to_batch = {}
         for batch_id, batch_data in enumerate(all_batches):
-            future = self.executor.submit(self.process_batch_with_retry, batch_data, batch_id)
+            future = self.executor.submit(self.process_batch_with_retry, batch_data, batch_id, cache_manager)
             future_to_batch[future] = batch_id
         
         # Collect results as they complete
@@ -812,11 +850,18 @@ Messages to analyze:
                 batch_id, batch_results = future.result()
                 results[batch_id] = batch_results
                 completed += 1
-                logger.info(f"Completed batch {batch_id} ({completed}/{len(all_batches)})")
+                
+                # Show cache stats every few batches
+                if completed % 3 == 0 or completed == len(all_batches):
+                    cache_stats = cache_manager.get_stats()
+                    logger.info(f"📊 Progress: {completed}/{len(all_batches)} batches complete | "
+                              f"Cache: {cache_stats['cache_size']} entries, "
+                              f"{cache_stats['unsaved_entries']} unsaved, "
+                              f"{cache_stats['hit_rate']:.1%} hit rate")
                 
             except Exception as e:
                 batch_id = future_to_batch[future]
-                logger.error(f"Batch {batch_id} failed completely: {e}")
+                logger.error(f"💥 Batch {batch_id} failed completely: {e}")
                 
                 # Create fallback results for failed batch
                 batch_size = len(all_batches[batch_id])
@@ -830,6 +875,9 @@ Messages to analyze:
                 ]
                 results[batch_id] = fallback_results
                 completed += 1
+        
+        # Final cache save to ensure everything is persisted
+        cache_manager.save_cache(force=True, reason="batch processing complete")
         
         # Ensure no None results
         for i, result in enumerate(results):
@@ -848,28 +896,34 @@ Messages to analyze:
         return results
 
 # ============================================================================
-# MAIN REFINED ANALYZER WITH PARALLEL PROCESSING
+# MAIN REFINED ANALYZER WITH PERIODIC CACHE SAVING
 # ============================================================================
 
 class RefinedSystemFeedbackAnalyzer:
-    """Main system feedback analysis orchestrator with refined preprocessing and parallel processing."""
+    """Main system feedback analysis orchestrator with periodic cache saving."""
     
     def __init__(self, db_config: DatabaseConfig, analyzer_config: AnalyzerConfig):
         self.config = analyzer_config
         self.db_manager = DatabaseManager(db_config)
         self.preprocessor = RefinedSystemFeedbackPreprocessor()
+        
+        # Initialize cache manager with periodic saving
+        cache_save_frequency = getattr(analyzer_config, 'cache_save_frequency', 10)
         self.cache_manager = ImprovedCacheManager(
             analyzer_config.cache_file, 
-            analyzer_config.cache_enabled
+            analyzer_config.cache_enabled,
+            save_frequency=cache_save_frequency
         )
+        
         self.llm_client = analyzer_config.llm_client
         
-        logger.info(f"Initialized Refined System Feedback Analyzer with:")
+        logger.info(f"🚀 Initialized Refined System Feedback Analyzer with:")
         logger.info(f"  Model: {analyzer_config.llm_client.config.model}")
         logger.info(f"  Base URL: {analyzer_config.llm_client.config.base_url or 'OpenAI Default'}")
         logger.info(f"  Batch size: {analyzer_config.batch_size}")
         logger.info(f"  Parallel batches: {analyzer_config.parallel_batches}")
         logger.info(f"  Cache enabled: {analyzer_config.cache_enabled}")
+        logger.info(f"  Cache save frequency: every {cache_save_frequency} entries")
         
         # Add cache status logging
         if analyzer_config.cache_enabled:
@@ -877,15 +931,11 @@ class RefinedSystemFeedbackAnalyzer:
             logger.info(f"  Cache status: {cache_stats['cache_size']} entries loaded")
             if cache_stats['cache_size'] > 0:
                 logger.info(f"  Cache file: {analyzer_config.cache_file}")
-                logger.info(f"  Previous cache hits: {cache_stats['cache_hits']}")
-                logger.info(f"  Previous cache misses: {cache_stats['cache_misses']}")
-                if cache_stats['total_requests'] > 0:
-                    logger.info(f"  Previous hit rate: {cache_stats['hit_rate']:.1%}")
         else:
             logger.info("  Cache disabled")
     
     def analyze_messages(self, limit: Optional[int] = None) -> pd.DataFrame:
-        """Main method to analyze messages for system feedback tone."""
+        """Main method to analyze messages for system feedback tone with periodic caching."""
         start_time = time.time()
         
         try:
@@ -895,12 +945,12 @@ class RefinedSystemFeedbackAnalyzer:
                 logger.warning("No messages found")
                 return pd.DataFrame()
             
-            logger.info(f"Processing {len(messages_df)} messages")
+            logger.info(f"📈 Processing {len(messages_df)} messages with periodic cache saving")
             
             # Step 2: Refined preprocessing
             potential_system_feedback, non_system_feedback = self._refined_preprocess_messages(messages_df)
             
-            # Step 3: Parallel LLM analysis
+            # Step 3: Parallel LLM analysis with periodic caching
             system_feedback_results = self._analyze_potential_system_feedback_parallel(potential_system_feedback)
             
             # Step 4: Combine results
@@ -910,17 +960,20 @@ class RefinedSystemFeedbackAnalyzer:
             results_df = pd.DataFrame(final_results)
             filename = self._save_results(results_df)
             
-            # Step 6: Log summary with performance metrics
+            # Step 6: Final cache save and log summary
+            self.cache_manager.save_cache(force=True, reason="analysis complete")
             self._log_comprehensive_summary(results_df, start_time, len(non_system_feedback), filename)
             
             return results_df
             
         except Exception as e:
             logger.error(f"Analysis failed: {e}")
+            # Always try to save cache even if analysis fails
+            self.cache_manager.save_cache(force=True, reason="analysis failed - emergency save")
             raise
         finally:
-            # Always save cache
-            self.cache_manager.save_cache()
+            # Ensure cache is always saved
+            self.cache_manager.save_cache(force=True, reason="final cleanup")
     
     def _refined_preprocess_messages(self, messages_df: pd.DataFrame) -> Tuple[List[dict], List[dict]]:
         """Refined preprocessing with detailed signal analysis."""
@@ -979,33 +1032,28 @@ class RefinedSystemFeedbackAnalyzer:
         return potential_system_feedback, non_system_feedback
     
     def _analyze_potential_system_feedback_parallel(self, potential_system_feedback: List[dict]) -> List[SystemFeedbackConfirmation]:
-        """Analyze potential system feedback messages with parallel LLM processing."""
+        """Analyze potential system feedback messages with parallel LLM processing and immediate caching."""
         if not potential_system_feedback:
             return []
         
-        logger.info(f"Analyzing {len(potential_system_feedback)} potential system feedback messages with parallel LLM processing")
+        logger.info(f"🔍 Analyzing {len(potential_system_feedback)} potential system feedback messages with parallel processing and periodic caching")
         
         # Check cache first and separate cached vs uncached
         uncached_messages = []
         cached_results = {}
         
-        logger.info(f"Checking cache for {len(potential_system_feedback)} messages...")
+        logger.info(f"💾 Checking cache for {len(potential_system_feedback)} messages...")
         
         for i, msg in enumerate(potential_system_feedback):
             cached_result = self.cache_manager.get(msg['row']['input'])
             if cached_result:
                 cached_results[i] = cached_result
-                logger.info(f"✅ CACHE HIT: Message {i+1} found in cache, skipping LLM call")
             else:
                 uncached_messages.append((i, msg))
-                logger.info(f"🔄 CACHE MISS: Message {i+1} not in cache, will process with LLM")
         
-        logger.info(f"Cache check complete: {len(cached_results)} cached, {len(uncached_messages)} need processing")
-        
-        # Show cache progress every 100 messages
-        if len(potential_system_feedback) > 100:
-            cache_stats = self.cache_manager.get_stats()
-            logger.info(f"Current cache performance: {cache_stats['cache_hits']} hits, {cache_stats['cache_misses']} misses ({cache_stats['hit_rate']:.1%} hit rate)")
+        cache_stats = self.cache_manager.get_stats()
+        logger.info(f"📊 Cache check complete: {len(cached_results)} cached, {len(uncached_messages)} need processing")
+        logger.info(f"📊 Current cache: {cache_stats['cache_size']} entries, {cache_stats['hit_rate']:.1%} hit rate")
         
         # Process uncached messages in parallel batches
         all_results = [None] * len(potential_system_feedback)
@@ -1034,13 +1082,13 @@ class RefinedSystemFeedbackAnalyzer:
             if current_batch:  # Don't forget the last batch
                 batches.append(current_batch)
             
-            logger.info(f"🔄 LLM PROCESSING: Created {len(batches)} batches for LLM processing ({len(uncached_messages)} total messages)")
+            logger.info(f"🔄 LLM PROCESSING: Created {len(batches)} batches for parallel processing ({len(uncached_messages)} total messages)")
             
-            # Process batches in parallel
+            # Process batches in parallel with immediate caching
             with ParallelBatchProcessor(self.llm_client, self.config.parallel_batches) as processor:
-                batch_results = processor.process_batches_parallel(batches)
+                batch_results = processor.process_batches_parallel(batches, self.cache_manager)
             
-            logger.info(f"✅ LLM PROCESSING: Completed {len(batches)} batches through LLM")
+            logger.info(f"✅ LLM PROCESSING: Completed {len(batches)} batches with periodic caching")
             
             # Merge results back
             for batch_idx, batch_result in enumerate(batch_results):
@@ -1050,15 +1098,12 @@ class RefinedSystemFeedbackAnalyzer:
                     if msg_idx < len(batch):
                         original_index = batch[msg_idx]['original_index']
                         all_results[original_index] = result
-                        
-                        # Cache the result
-                        original_text = potential_system_feedback[original_index]['row']['input']
-                        self.cache_manager.set(original_text, result)
-                        logger.info(f"💾 CACHE SAVE: Message {original_index+1} result saved to cache")
             
-            # Save cache periodically
-            self.cache_manager.save_cache()
-            logger.info(f"💾 CACHE SAVED: All new results saved to disk ({len(uncached_messages)} new entries)")
+            # Final cache save to ensure everything is persisted
+            final_stats = self.cache_manager.get_stats()
+            logger.info(f"💾 Final cache status: {final_stats['cache_size']} total entries, "
+                       f"{final_stats['total_entries_processed']} processed this session")
+            
         else:
             logger.info(f"✅ ALL CACHED: No LLM processing needed - all messages found in cache")
         
@@ -1207,12 +1252,14 @@ class RefinedSystemFeedbackAnalyzer:
         logger.info(f"  Content filtered: {content_filtered_count:,} ({content_filtered_count/total_messages*100:.1f}%)")
         logger.info(f"  Processing errors: {error_count:,} ({error_count/total_messages*100:.1f}%)")
         
-        # Cache performance
+        # Cache performance with new metrics
         logger.info("💾 CACHE PERFORMANCE:")
         logger.info(f"  Cache size: {cache_stats['cache_size']:,} entries")
         logger.info(f"  Cache hit rate: {cache_stats['hit_rate']:.1%}")
         logger.info(f"  Cache hits: {cache_stats['cache_hits']:,}")
         logger.info(f"  Cache misses: {cache_stats['cache_misses']:,}")
+        logger.info(f"  Session entries processed: {cache_stats['total_entries_processed']:,}")
+        logger.info(f"  Save frequency: every {cache_stats['save_frequency']} entries")
         
         # Configuration used
         logger.info("⚙️  CONFIGURATION:")
@@ -1220,13 +1267,14 @@ class RefinedSystemFeedbackAnalyzer:
         logger.info(f"  Parallel batches: {self.config.parallel_batches}")
         logger.info(f"  Model: {self.llm_client.config.model}")
         logger.info(f"  Max retries: {self.config.max_retries}")
+        logger.info(f"  Cache save frequency: {self.cache_manager.save_frequency}")
         
         logger.info("📁 OUTPUT:")
         logger.info(f"  Results file: {filename}")
         logger.info("=" * 80)
 
 # ============================================================================
-# INITIALIZATION FUNCTIONS (Same as before)
+# INITIALIZATION FUNCTIONS (unchanged)
 # ============================================================================
 
 def initialize_openai_client(api_key: str, 
@@ -1249,11 +1297,11 @@ def initialize_client_from_env() -> GenericLLMClient:
     return create_client_from_env()
 
 # ============================================================================
-# MAIN ENTRY POINT
+# MAIN ENTRY POINT WITH PERIODIC CACHE SAVING
 # ============================================================================
 
 def main():
-    """Main entry point for the refined system feedback analyzer with parallel processing."""
+    """Main entry point with periodic cache saving configuration."""
     try:
         # Database configuration
         db_config = DatabaseConfig(
@@ -1264,40 +1312,33 @@ def main():
             password="your_password"
         )
         
-        # Option 1: Initialize OpenAI client
+        # Initialize LLM client
         llm_client = initialize_openai_client(
             api_key="your-openai-api-key",
             model="gpt-4o"
         )
         
-        # Option 2: Initialize custom endpoint client
-        # llm_client = initialize_custom_client(
-        #     api_key="your-api-key",
-        #     base_url="https://your-custom-endpoint.com/v1",
-        #     model="gpt-4o"
-        # )
-        
-        # Option 3: Initialize from environment variables
-        # llm_client = initialize_client_from_env()
-        
         # Test LLM connection
         if not llm_client.test_connection():
             raise Exception("LLM connection test failed")
         
-        # Analyzer configuration with parallel processing
+        # Analyzer configuration with periodic cache saving
         analyzer_config = AnalyzerConfig(
             llm_client=llm_client,
-            batch_size=10,           # Messages per batch
-            parallel_batches=5,      # Number of parallel batches
+            batch_size=10,                    # Messages per batch
+            parallel_batches=5,               # Number of parallel batches
             cache_enabled=True,
             cache_file="refined_system_feedback_cache.pkl",
+            cache_save_frequency=10,          # Save cache after every 10 new entries
             max_retries=3,
             retry_delay=1.0
         )
         
+        logger.info(f"🎯 Starting analysis with cache saving every {analyzer_config.cache_save_frequency} entries")
+        
         # Initialize and run analyzer
         analyzer = RefinedSystemFeedbackAnalyzer(db_config, analyzer_config)
-        results = analyzer.analyze_messages(limit=100000)  # Process all 100k messages
+        results = analyzer.analyze_messages(limit=100000)
         
         # Display results summary
         if not results.empty:
@@ -1305,11 +1346,12 @@ def main():
             total_messages = len(results)
             efficiency = len(results[results['preprocessing_result'] == 'non_system_feedback']) / total_messages
             
-            print(f"\n🎯 REFINED SYSTEM FEEDBACK ANALYSIS COMPLETE!")
+            print(f"\n🎯 ANALYSIS COMPLETE WITH PERIODIC CACHING!")
             print(f"📊 Total messages analyzed: {total_messages:,}")
             print(f"💬 Messages with system feedback: {system_feedback_count:,}")
             print(f"📈 System feedback rate: {system_feedback_count/total_messages*100:.2f}%")
             print(f"⚡ Preprocessing efficiency: {efficiency*100:.1f}% filtered")
+            print(f"💾 Cache saved periodically every {analyzer_config.cache_save_frequency} entries")
             
             # Show example system feedback messages
             system_feedback_examples = results[results['has_system_feedback'] == True].head(3)
