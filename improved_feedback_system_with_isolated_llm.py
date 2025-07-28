@@ -517,7 +517,7 @@ class ImprovedCacheManager:
                 pickle.dump(cache_dict, f)
             
             os.replace(temp_file, self.cache_file)
-            logger.debug(f"Saved {len(cache_dict)} entries to cache")
+            logger.info(f"💾 Cache saved: {len(cache_dict)} entries to {self.cache_file}")  # Enhanced logging
             
         except Exception as e:
             logger.warning(f"Could not save cache: {e}")
@@ -538,8 +538,10 @@ class ImprovedCacheManager:
         
         if result:
             self.cache_hits += 1
+            logger.debug(f"Cache HIT for text: {text[:50]}...")  # Add detailed hit logging
         else:
             self.cache_misses += 1
+            logger.debug(f"Cache MISS for text: {text[:50]}...")  # Add detailed miss logging
             
         return result
     
@@ -868,6 +870,19 @@ class RefinedSystemFeedbackAnalyzer:
         logger.info(f"  Batch size: {analyzer_config.batch_size}")
         logger.info(f"  Parallel batches: {analyzer_config.parallel_batches}")
         logger.info(f"  Cache enabled: {analyzer_config.cache_enabled}")
+        
+        # Add cache status logging
+        if analyzer_config.cache_enabled:
+            cache_stats = self.cache_manager.get_stats()
+            logger.info(f"  Cache status: {cache_stats['cache_size']} entries loaded")
+            if cache_stats['cache_size'] > 0:
+                logger.info(f"  Cache file: {analyzer_config.cache_file}")
+                logger.info(f"  Previous cache hits: {cache_stats['cache_hits']}")
+                logger.info(f"  Previous cache misses: {cache_stats['cache_misses']}")
+                if cache_stats['total_requests'] > 0:
+                    logger.info(f"  Previous hit rate: {cache_stats['hit_rate']:.1%}")
+        else:
+            logger.info("  Cache disabled")
     
     def analyze_messages(self, limit: Optional[int] = None) -> pd.DataFrame:
         """Main method to analyze messages for system feedback tone."""
@@ -974,14 +989,23 @@ class RefinedSystemFeedbackAnalyzer:
         uncached_messages = []
         cached_results = {}
         
+        logger.info(f"Checking cache for {len(potential_system_feedback)} messages...")
+        
         for i, msg in enumerate(potential_system_feedback):
             cached_result = self.cache_manager.get(msg['row']['input'])
             if cached_result:
                 cached_results[i] = cached_result
+                logger.info(f"✅ CACHE HIT: Message {i+1} found in cache, skipping LLM call")
             else:
                 uncached_messages.append((i, msg))
+                logger.info(f"🔄 CACHE MISS: Message {i+1} not in cache, will process with LLM")
         
-        logger.info(f"Cache stats: {len(cached_results)} cached, {len(uncached_messages)} need processing")
+        logger.info(f"Cache check complete: {len(cached_results)} cached, {len(uncached_messages)} need processing")
+        
+        # Show cache progress every 100 messages
+        if len(potential_system_feedback) > 100:
+            cache_stats = self.cache_manager.get_stats()
+            logger.info(f"Current cache performance: {cache_stats['cache_hits']} hits, {cache_stats['cache_misses']} misses ({cache_stats['hit_rate']:.1%} hit rate)")
         
         # Process uncached messages in parallel batches
         all_results = [None] * len(potential_system_feedback)
@@ -1010,11 +1034,13 @@ class RefinedSystemFeedbackAnalyzer:
             if current_batch:  # Don't forget the last batch
                 batches.append(current_batch)
             
-            logger.info(f"Created {len(batches)} batches for parallel processing")
+            logger.info(f"🔄 LLM PROCESSING: Created {len(batches)} batches for LLM processing ({len(uncached_messages)} total messages)")
             
             # Process batches in parallel
             with ParallelBatchProcessor(self.llm_client, self.config.parallel_batches) as processor:
                 batch_results = processor.process_batches_parallel(batches)
+            
+            logger.info(f"✅ LLM PROCESSING: Completed {len(batches)} batches through LLM")
             
             # Merge results back
             for batch_idx, batch_result in enumerate(batch_results):
@@ -1028,9 +1054,13 @@ class RefinedSystemFeedbackAnalyzer:
                         # Cache the result
                         original_text = potential_system_feedback[original_index]['row']['input']
                         self.cache_manager.set(original_text, result)
+                        logger.info(f"💾 CACHE SAVE: Message {original_index+1} result saved to cache")
             
             # Save cache periodically
             self.cache_manager.save_cache()
+            logger.info(f"💾 CACHE SAVED: All new results saved to disk ({len(uncached_messages)} new entries)")
+        else:
+            logger.info(f"✅ ALL CACHED: No LLM processing needed - all messages found in cache")
         
         # Filter out any None results
         final_results = []
