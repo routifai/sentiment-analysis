@@ -239,9 +239,19 @@ class GenericLLMClient:
             else:
                 # Generic error response
                 return response_model()
-        except Exception:
-            # If we can't create a proper error response, return None
-            return None
+        except Exception as e:
+            logger.error(f"Could not create error response: {e}")
+            # Create a minimal response to avoid None
+            try:
+                return response_model(
+                    has_system_feedback=False,
+                    confidence_score=0.0,
+                    reasoning=f"Analysis failed: {error_message}",
+                    feedback_type="error"
+                )
+            except Exception:
+                # Last resort - create with minimal fields
+                return response_model()
     
     def _create_content_filtered_response(self, response_model: BaseModel, text: str) -> BaseModel:
         """Create a response for content that was filtered by the API."""
@@ -261,8 +271,19 @@ class GenericLLMClient:
                 )
             else:
                 return response_model()
-        except Exception:
-            return None
+        except Exception as e:
+            logger.error(f"Could not create content filtered response: {e}")
+            # Create a minimal response to avoid None
+            try:
+                return response_model(
+                    has_system_feedback=False,
+                    confidence_score=0.0,
+                    reasoning="Content filtered by API - unable to analyze",
+                    feedback_type="content_filtered"
+                )
+            except Exception:
+                # Last resort - create with minimal fields
+                return response_model()
     
     def _create_content_filtered_batch_response(self, messages_data: List[dict], response_model: BaseModel) -> List[BaseModel]:
         """Create batch response for content that was filtered by the API."""

@@ -571,7 +571,10 @@ class ImprovedSystemFeedbackAnalyzer:
                 
                 # Cache new results
                 for msg, result in zip(uncached_batch, new_results):
-                    self.cache_manager.set(msg['row']['input'], result)
+                    if result is not None:  # Add null check
+                        self.cache_manager.set(msg['row']['input'], result)
+                    else:
+                        logger.warning(f"Received None result for message: {msg['row']['input'][:50]}...")
                 
                 # Merge results maintaining order
                 batch_results = []
@@ -580,10 +583,28 @@ class ImprovedSystemFeedbackAnalyzer:
                 
                 for msg in batch:
                     if any(msg is uncached_msg for uncached_msg in uncached_batch):
-                        batch_results.append(new_results[new_idx])
+                        result = new_results[new_idx] if new_idx < len(new_results) else None
+                        if result is None:
+                            # Create fallback result
+                            result = SystemFeedbackConfirmation(
+                                has_system_feedback=False,
+                                confidence_score=0.0,
+                                reasoning="None result from LLM - using fallback",
+                                feedback_type="error"
+                            )
+                        batch_results.append(result)
                         new_idx += 1
                     else:
-                        batch_results.append(cached_results[cached_idx])
+                        result = cached_results[cached_idx] if cached_idx < len(cached_results) else None
+                        if result is None:
+                            # Create fallback result
+                            result = SystemFeedbackConfirmation(
+                                has_system_feedback=False,
+                                confidence_score=0.0,
+                                reasoning="None result from cache - using fallback",
+                                feedback_type="error"
+                            )
+                        batch_results.append(result)
                         cached_idx += 1
                 
                 all_results.extend(batch_results)
