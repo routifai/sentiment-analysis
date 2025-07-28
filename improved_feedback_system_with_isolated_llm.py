@@ -74,13 +74,15 @@ class FeedbackSignals:
     confidence: float
 
 # ============================================================================
-# REFINED PREPROCESSOR (unchanged)
+# SCORE-AWARE PREPROCESSING - Based on real feedback patterns
 # ============================================================================
 
-class RefinedSystemFeedbackPreprocessor:
+class ScoreAwareSystemFeedbackPreprocessor:
     """
-    More accurate preprocessing that captures nuanced feedback patterns
-    while avoiding false positives from user instructions.
+    Preprocessing based on the insight that real feedback is typically:
+    - Short and concise (not long prompts)
+    - Score range 2-10 (not too low, not too high)
+    - Direct and to the point
     """
     
     def __init__(self):
@@ -89,90 +91,86 @@ class RefinedSystemFeedbackPreprocessor:
         self.context_analyzers = self._initialize_context_analyzers()
     
     def _initialize_feedback_patterns(self) -> Dict[str, List[str]]:
-        """Initialize patterns that indicate feedback (both positive and negative)."""
+        """Feedback patterns optimized for short, direct feedback."""
         return {
-            # TEMPORAL FEEDBACK (past tense = already happened)
+            # TEMPORAL FEEDBACK - focused on short expressions
             'temporal_indicators': [
-                # Past tense responses
-                r'\b(response|answer|output|result|summary)\s+(was|were|seemed|appeared|looked)\b',
-                r'\b(you|it)\s+(did|didn\'t|performed|failed|succeeded|worked)\b',
+                # Short past tense responses
+                r'\b(response|answer|output|result|summary)\s+(was|were|seemed|appeared)\b',
+                r'\b(you|it)\s+(did|didn\'t|worked|failed|helped)\b',
                 r'\b(that|this)\s+(was|wasn\'t|seemed|didn\'t|helped|worked)\b',
                 
-                # Past experience with system
-                r'\b(last time|previously|before|earlier)\s.*(you|response|answer)\b',
-                r'\b(you\s+)?(gave|provided|offered|suggested|recommended|generated)\b',
-                r'\b(received|got)\s.*(response|answer|result)\b'
+                # Short past experience references
+                r'\b(last time|before|earlier)\s.*(you|response)\b',
+                r'\b(you\s+)?(gave|provided|said|told|suggested)\b',
+                r'\b(got|received)\s.*(response|answer)\b',
+                
+                # Quick acknowledgments
+                r'\b(just|now)\s+(you|that)\b',
+                r'\b(when\s+you|after\s+you)\s+(said|told)\b'
             ],
             
-            # EVALUATION LANGUAGE (quality judgments)
+            # EVALUATION LANGUAGE - short evaluative phrases
             'evaluation_indicators': [
-                # Quality assessments
-                r'\b(accurate|inaccurate|correct|incorrect|right|wrong|precise|imprecise)\b',
-                r'\b(helpful|unhelpful|useful|useless|valuable|worthless)\b',
-                r'\b(clear|unclear|confusing|understandable|readable|coherent)\b',
-                r'\b(complete|incomplete|thorough|superficial|detailed|vague)\b',
-                r'\b(relevant|irrelevant|appropriate|inappropriate|suitable)\b',
+                # Simple quality assessments
+                r'\b(good|bad|great|poor|excellent|terrible|awful|perfect)\b',
+                r'\b(right|wrong|correct|incorrect|accurate|inaccurate)\b',
+                r'\b(helpful|unhelpful|useful|useless|clear|unclear)\b',
+                r'\b(better|worse|improved|degraded)\b',
                 
-                # Satisfaction/sentiment
-                r'\b(satisfied|dissatisfied|happy|thank|unhappy|pleased|displeased|disappointed)\b',
-                r'\b(impressed|unimpressed|surprised|expected|unexpected)\b',
-                r'\b(excellent|good|bad|poor|terrible|awful|great|amazing)\b',
+                # Short satisfaction expressions
+                r'\b(thanks|thank\s+you|appreciate|disappointed|satisfied)\b',
+                r'\b(like|love|hate|dislike|enjoy)\b',
+                r'\b(makes\s+sense|doesn\'t\s+make\s+sense|confusing)\b',
                 
-                # Performance judgments
-                r'\b(better|worse|improved|degraded|faster|slower)\b',
-                r'\b(meets|exceeds|below)\s+(expectations|standards)\b'
+                # Simple comparisons
+                r'\b(more|less)\s+(helpful|clear|useful)\b',
+                r'\b(not\s+quite|almost|close|exactly)\b'
             ],
             
-            # REFERENCE TO SYSTEM OUTPUT
+            # REFERENCE TO SYSTEM OUTPUT - short references
             'reference_indicators': [
-                # Direct references to AI output
-                r'\b(your|the)\s+(response|answer|output|result|summary|analysis|explanation)\b',
-                r'\b(response|answer|output)\s+(you\s+)?(gave|provided|generated|created)\b',
-                r'\b(what\s+you\s+)?(said|wrote|mentioned|suggested|recommended|explained)\b',
+                # Simple references to AI output
+                r'\b(your|the)\s+(response|answer|output|suggestion|advice)\b',
+                r'\b(what\s+you\s+)?(said|told|mentioned|suggested)\b',
+                r'\b(your\s+)?(suggestion|advice|idea|solution)\b',
                 
-                # References to system behavior
-                r'\b(how\s+you\s+)?(handled|approached|processed|analyzed|interpreted)\b',
-                r'\b(way\s+you\s+)?(responded|answered|explained|described)\b'
+                # Short behavior references
+                r'\b(how\s+you|way\s+you)\s+(responded|answered|handled)\b',
+                r'\b(according\s+to\s+you|like\s+you\s+said)\b'
             ],
             
-            # COMPARATIVE FEEDBACK
-            'comparative_indicators': [
-                r'\b(compared\s+to|versus|vs|instead\s+of|rather\s+than)\b',
-                r'\b(more|less)\s+(helpful|accurate|detailed|clear)\s+(than)\b',
-                r'\b(should\s+have|could\s+have|would\s+have)\s+(been|said|included)\b'
+            # SHORT CONTINUATION SIGNALS
+            'continuation_indicators': [
+                r'\b(also|but|however|though|still)\b',
+                r'\b(and|plus|besides)\b',
+                r'\b(by\s+the\s+way|anyway)\b'
             ]
         }
     
     def _initialize_instruction_patterns(self) -> Dict[str, List[str]]:
-        """Initialize patterns that indicate user instructions (to exclude)."""
+        """Instruction patterns that clearly indicate non-feedback."""
         return {
-            # DIRECT REQUESTS/COMMANDS
+            # CLEAR REQUESTS/COMMANDS
             'request_patterns': [
-                r'^\s*(can|could|would|will|please)\s+you\b',
-                r'^\s*(help\s+me|assist\s+me|show\s+me|tell\s+me|explain\s+to\s+me)\b',
+                r'^\s*(can|could|would|will|please)\s+you\s+(help|assist|show|tell|explain|do|make|create|write)\b',
+                r'^\s*(help\s+me|assist\s+me|show\s+me|tell\s+me|explain)\s+(with|how|what|why)\b',
                 r'^\s*(i\s+need|i\s+want|i\s+would\s+like)\s+you\s+to\b',
-                r'\b(do\s+this|perform\s+this|execute\s+this|run\s+this)\b'
+                r'^\s*(generate|create|write|make|build|design|develop)\b'
             ],
             
-            # QUESTIONS TO SYSTEM
+            # CLEAR QUESTIONS
             'question_patterns': [
-                r'^\s*(what|how|where|when|why|who|which|whose)\b.*\?',
-                r'^\s*(is|are|was|were|will|would|can|could|should|do|does|did)\b.*\?',
-                r'\b(tell\s+me|explain|describe|define|clarify)\s+(what|how|why|when|where)\b'
+                r'^\s*(what|how|where|when|why|who|which)\s+.{15,}\?$',  # Substantial questions
+                r'^\s*(is|are|was|were|will|would|can|could|should|do|does|did)\s+.{15,}\?$',
+                r'^\s*(can\s+you\s+tell\s+me|do\s+you\s+know)\b.*\?'
             ],
             
             # TASK ASSIGNMENTS
             'task_patterns': [
-                r'\b(your\s+)?(task|job|role|mission|goal|objective)\s+(is|will\s+be)\b',
-                r'\b(you\s+)?(should|must|need\s+to|have\s+to|are\s+to)\b',
-                r'\b(act\s+as|pretend\s+to\s+be|role\s+play|imagine\s+you\s+are)\b'
-            ],
-            
-            # VERIFICATION REQUESTS
-            'verification_patterns': [
-                r'\b(verify|check|confirm|validate|ensure|make\s+sure)\s+(this|that|if|whether)\b',
-                r'\b(is\s+this|is\s+that)\s+(correct|right|true|accurate|valid)\b',
-                r'\b(double\s+check|fact\s+check|review\s+this)\b'
+                r'\b(your\s+)?(task|job|role|mission|assignment)\s+(is|will\s+be)\b',
+                r'\b(you\s+)?(should|must|need\s+to|have\s+to)\s+(analyze|review|examine|check)\b',
+                r'\b(act\s+as|pretend\s+to\s+be|imagine\s+you\s+are)\b'
             ]
         }
     
@@ -254,6 +252,41 @@ class RefinedSystemFeedbackPreprocessor:
             'previous_references': previous_ref
         }
     
+    def _analyze_message_characteristics(self, text: str) -> Dict[str, any]:
+        """Analyze key characteristics that distinguish feedback from instructions."""
+        
+        words = text.split()
+        word_count = len(words)
+        char_count = len(text)
+        sentence_count = len(re.split(r'[.!?]+', text.strip()))
+        
+        # Analyze sentence structure
+        avg_sentence_length = word_count / max(1, sentence_count)
+        has_question_mark = '?' in text
+        has_multiple_sentences = sentence_count > 2
+        
+        # Analyze complexity
+        complex_words = len([w for w in words if len(w) > 8])  # Long words
+        complex_ratio = complex_words / max(1, word_count)
+        
+        # Analyze punctuation patterns
+        exclamation_count = text.count('!')
+        question_count = text.count('?')
+        period_count = text.count('.')
+        
+        return {
+            'word_count': word_count,
+            'char_count': char_count,
+            'sentence_count': sentence_count,
+            'avg_sentence_length': avg_sentence_length,
+            'has_question_mark': has_question_mark,
+            'has_multiple_sentences': has_multiple_sentences,
+            'complex_ratio': complex_ratio,
+            'exclamation_count': exclamation_count,
+            'question_count': question_count,
+            'period_count': period_count
+        }
+    
     def analyze_feedback_signals(self, text: str) -> FeedbackSignals:
         """Comprehensive analysis of feedback signals in text."""
         if not text or pd.isna(text):
@@ -333,25 +366,25 @@ class RefinedSystemFeedbackPreprocessor:
         
         score = 0.0
         
-        # Positive indicators (feedback signals) - MORE CONSERVATIVE
-        score += len(temporal_signals) * 2.5        # Reduced from 3.0
-        score += len(evaluation_signals) * 2.0      # Reduced from 2.5
-        score += len(reference_signals) * 1.5       # Reduced from 2.0
-        score += pronoun_analysis['feedback_pronoun_count'] * 1.0  # Reduced from 1.5
-        score += tense_analysis['past_tense_count'] * 0.8  # Reduced from 1.0
-        score += sentiment_analysis['total_evaluation'] * 1.5  # Reduced from 2.0
-        score += context_analysis['previous_references'] * 1.0  # Reduced from 1.5
+        # Positive indicators (feedback signals) - OPTIMIZED FOR 2-10 RANGE
+        score += len(temporal_signals) * 2.5        
+        score += len(evaluation_signals) * 2.0      
+        score += len(reference_signals) * 1.5       
+        score += pronoun_analysis['feedback_pronoun_count'] * 1.0  
+        score += tense_analysis['past_tense_count'] * 0.8  
+        score += sentiment_analysis['total_evaluation'] * 1.5  
+        score += context_analysis['previous_references'] * 1.0  
         
         # Negative indicators (instruction signals) - MORE PENALTY
-        score -= len(instruction_signals) * 3.0     # Increased penalty from 2.0
-        score -= pronoun_analysis['instruction_pronoun_count'] * 2.0  # Increased from 1.5
-        score -= tense_analysis['future_tense_count'] * 1.5  # Increased from 1.0
+        score -= len(instruction_signals) * 3.0     
+        score -= pronoun_analysis['instruction_pronoun_count'] * 2.0  
+        score -= tense_analysis['future_tense_count'] * 1.5  
         
-        # Stricter ratio bonuses
-        if pronoun_analysis['pronoun_ratio'] > 2.0:  # Increased from 1.5
-            score += 1.5  # Reduced from 2.0
-        if tense_analysis['tense_ratio'] > 2.0:  # Increased from 1.5
-            score += 1.5  # Reduced from 2.0
+        # Ratio bonuses
+        if pronoun_analysis['pronoun_ratio'] > 2.0:
+            score += 1.5
+        if tense_analysis['tense_ratio'] > 2.0:
+            score += 1.5
         
         return max(0.0, score)  # Ensure non-negative
     
@@ -366,89 +399,179 @@ class RefinedSystemFeedbackPreprocessor:
         if feedback_strength == 0 and instruction_strength == 0:
             return 0.1  # Very low confidence for ambiguous text
         
-        # Stricter high confidence requirements
-        if feedback_strength >= 4 and instruction_strength == 0:  # Increased from 3
+        # High confidence requirements
+        if feedback_strength >= 4 and instruction_strength == 0:
             return 0.95
-        if instruction_strength >= 3 and feedback_strength == 0:  # Increased from 2
+        if instruction_strength >= 3 and feedback_strength == 0:
             return 0.9
         
-        # More conservative medium confidence
+        # Medium confidence
         if feedback_strength > instruction_strength:
-            return 0.6 + min(0.2, (feedback_strength - instruction_strength) * 0.08)  # Reduced from 0.7
+            return 0.6 + min(0.2, (feedback_strength - instruction_strength) * 0.08)
         elif instruction_strength > feedback_strength:
-            return 0.5 + min(0.2, (instruction_strength - feedback_strength) * 0.08)  # Reduced from 0.6
+            return 0.5 + min(0.2, (instruction_strength - feedback_strength) * 0.08)
         else:
-            return 0.4  # Reduced from 0.5 for equal signals
+            return 0.4
     
     def is_potential_system_feedback(self, text: str) -> bool:
-        """Determine if text is potential system feedback with nuanced analysis."""
-        signals = self.analyze_feedback_signals(text)
+        """Score-aware classification based on real feedback patterns."""
         
-        # REJECT if score is too high (indicates long/complex prompt, not feedback)
-        if signals.score > 12.0:  # Maximum threshold for feedback-like messages
+        if not text or pd.isna(text):
             return False
-        # STRICTER Multi-criteria decision
-        criteria = {
-            'has_strong_feedback_signals': signals.score >= 6.0,  # Increased from 4.0
-            'has_temporal_indicators': len(signals.temporal_signals) >= 2,  # Increased from 1
-            'has_evaluation_language': len(signals.evaluation_signals) >= 2,  # Increased from 1
-            'no_instruction_signals': len(signals.instruction_signals) == 0,  # Stricter: must be 0
-            'high_confidence': signals.confidence >= 0.8  # Increased from 0.7
-        }
         
-        # Stricter scoring: need more criteria to pass
-        criteria_met = sum(criteria.values())
+        # Get signal analysis
+        signals = self.analyze_feedback_signals(text)
+        characteristics = self._analyze_message_characteristics(text)
         
-        # Much stricter thresholds
-        if signals.confidence >= 0.9:
-            return criteria_met >= 4  # Increased from 2
-        elif signals.confidence >= 0.8:
-            return criteria_met >= 4  # Increased from 3
-        else:
-            return criteria_met >= 5  # Increased from 4 (all criteria must be met)
+        # RULE 1: Length-based filtering (feedback is typically short)
+        if characteristics['word_count'] > 80:  # Very long messages are usually instructions
+            return False
+        
+        if characteristics['word_count'] > 50 and signals.score > 8:  # Medium-long with high score
+            return False
+        
+        # RULE 2: Score-based filtering (KEY INSIGHT!)
+        if signals.score > 15:  # Very high score = likely complex instruction
+            return False
+        
+        if signals.score < 1.5:  # Very low score = no feedback signals
+            return False
+        
+        # RULE 3: Question filtering
+        if characteristics['has_question_mark'] and characteristics['word_count'] > 20:
+            # Long questions are usually asking for help, not feedback
+            return False
+        
+        # RULE 4: Complex instruction filtering
+        if (len(signals.instruction_signals) >= 2 and 
+            characteristics['word_count'] > 30 and
+            len(signals.temporal_signals) == 0):
+            return False
+        
+        # POSITIVE INDICATORS for feedback (optimized for score range 2-10)
+        positive_score = 0
+        
+        # Score in the sweet spot (2-10)
+        if 2.0 <= signals.score <= 10.0:
+            positive_score += 3  # Strong positive signal
+        elif 1.5 <= signals.score <= 12.0:
+            positive_score += 2  # Medium positive signal
+        elif signals.score > 12.0:
+            positive_score -= 2  # Penalty for very high scores
+        
+        # Feedback signals
+        if len(signals.temporal_signals) >= 1:
+            positive_score += 2
+        if len(signals.evaluation_signals) >= 1:
+            positive_score += 2
+        if len(signals.reference_signals) >= 1:
+            positive_score += 1
+        
+        # Length bonuses (shorter is better for feedback)
+        if characteristics['word_count'] <= 20:  # Very short
+            positive_score += 2
+        elif characteristics['word_count'] <= 40:  # Medium short
+            positive_score += 1
+        
+        # Simple structure bonus
+        if characteristics['sentence_count'] <= 2:  # Simple structure
+            positive_score += 1
+        
+        # Confidence bonus
+        if signals.confidence >= 0.7:
+            positive_score += 1
+        
+        # NEGATIVE INDICATORS
+        negative_score = 0
+        
+        # Instruction signals
+        if len(signals.instruction_signals) >= 1:
+            negative_score += 1
+        if len(signals.instruction_signals) >= 2:
+            negative_score += 2
+        
+        # Complexity penalties
+        if characteristics['complex_ratio'] > 0.3:  # Many complex words
+            negative_score += 1
+        if characteristics['avg_sentence_length'] > 25:  # Very long sentences
+            negative_score += 1
+        
+        # FINAL DECISION
+        final_score = positive_score - negative_score
+        
+        # Multiple pathways to qualify:
+        
+        # 1. Strong evidence in the sweet spot
+        if final_score >= 5 and 2.0 <= signals.score <= 10.0:
+            return True
+        
+        # 2. Clear feedback signals with good characteristics
+        if (len(signals.temporal_signals) >= 1 or len(signals.evaluation_signals) >= 1) and \
+           characteristics['word_count'] <= 50 and negative_score <= 1:
+            return True
+        
+        # 3. High confidence with reasonable score
+        if signals.confidence >= 0.8 and 1.5 <= signals.score <= 12.0 and final_score >= 2:
+            return True
+        
+        # 4. Short message with any feedback signals
+        if characteristics['word_count'] <= 25 and \
+           (len(signals.temporal_signals) >= 1 or len(signals.evaluation_signals) >= 1) and \
+           negative_score == 0:
+            return True
+        
+        return False
     
     def get_classification_reasoning(self, text: str) -> Dict[str, any]:
-        """Get detailed reasoning for classification decision."""
+        """Enhanced reasoning with score and length awareness."""
         signals = self.analyze_feedback_signals(text)
+        characteristics = self._analyze_message_characteristics(text)
         is_feedback = self.is_potential_system_feedback(text)
+        
+        # Build detailed reasoning
+        reasoning_parts = []
+        
+        if is_feedback:
+            reasoning_parts.append(f"Score in good range: {signals.score:.1f}")
+            if characteristics['word_count'] <= 50:
+                reasoning_parts.append(f"Appropriate length: {characteristics['word_count']} words")
+            if len(signals.temporal_signals) >= 1:
+                reasoning_parts.append(f"Temporal signals: {len(signals.temporal_signals)}")
+            if len(signals.evaluation_signals) >= 1:
+                reasoning_parts.append(f"Evaluation language: {len(signals.evaluation_signals)}")
+            
+            reason = f"Likely feedback: {', '.join(reasoning_parts)}"
+        else:
+            if signals.score > 15:
+                reason = f"Score too high ({signals.score:.1f}) - likely complex instruction"
+            elif characteristics['word_count'] > 80:
+                reason = f"Too long ({characteristics['word_count']} words) for typical feedback"
+            elif signals.score < 1.5:
+                reason = f"Score too low ({signals.score:.1f}) - insufficient feedback signals"
+            elif len(signals.instruction_signals) >= 2:
+                reason = f"Multiple instruction patterns ({len(signals.instruction_signals)})"
+            elif characteristics['has_question_mark'] and characteristics['word_count'] > 20:
+                reason = f"Long question ({characteristics['word_count']} words) - likely seeking help"
+            else:
+                reason = f"Doesn't meet feedback criteria (score: {signals.score:.1f}, words: {characteristics['word_count']})"
         
         return {
             'classification': 'feedback' if is_feedback else 'not_feedback',
             'confidence': signals.confidence,
             'score': signals.score,
+            'word_count': characteristics['word_count'],
+            'characteristics': characteristics,
             'signals_detected': {
                 'temporal': signals.temporal_signals,
                 'evaluation': signals.evaluation_signals,
                 'reference': signals.reference_signals,
                 'instruction': signals.instruction_signals
             },
-            'reasoning': self._generate_reasoning(signals, is_feedback)
+            'reasoning': reason
         }
-    
-    def _generate_reasoning(self, signals: FeedbackSignals, is_feedback: bool) -> str:
-        """Generate human-readable reasoning for the classification."""
-        if is_feedback:
-            reasons = []
-            if signals.temporal_signals:
-                reasons.append(f"contains past-tense feedback indicators ({len(signals.temporal_signals)} found)")
-            if signals.evaluation_signals:
-                reasons.append(f"uses evaluative language ({len(signals.evaluation_signals)} terms)")
-            if signals.reference_signals:
-                reasons.append(f"references system output ({len(signals.reference_signals)} references)")
-            
-            return f"Classified as feedback because it " + " and ".join(reasons) + f" (confidence: {signals.confidence:.2f})"
-        else:
-            if signals.instruction_signals:
-                return f"Classified as instruction because it contains {len(signals.instruction_signals)} instruction patterns (confidence: {signals.confidence:.2f})"
-            elif signals.score > 12.0:
-                return f"Classified as non-feedback due to excessively high score (score: {signals.score:.1f}), likely a long/complex prompt rather than feedback"
-            elif signals.score < 2.0:
-                return f"Classified as non-feedback due to insufficient feedback signals (score: {signals.score:.1f}, confidence: {signals.confidence:.2f})"
-            else:
-                return f"Classified as ambiguous/non-feedback (score: {signals.score:.1f}, confidence: {signals.confidence:.2f})"
 
 # ============================================================================
-# IMPROVED CACHE MANAGER WITH PERIODIC SAVING
+# IMPROVED CACHE MANAGER WITH PERIODIC SAVING (unchanged)
 # ============================================================================
 
 class ImprovedCacheManager:
@@ -896,16 +1019,18 @@ Messages to analyze:
         return results
 
 # ============================================================================
-# MAIN REFINED ANALYZER WITH PERIODIC CACHE SAVING
+# MAIN ENHANCED ANALYZER WITH SCORE-AWARE PREPROCESSING
 # ============================================================================
 
-class RefinedSystemFeedbackAnalyzer:
-    """Main system feedback analysis orchestrator with periodic cache saving."""
+class EnhancedSystemFeedbackAnalyzer:
+    """Main system feedback analysis orchestrator with score-aware preprocessing."""
     
     def __init__(self, db_config: DatabaseConfig, analyzer_config: AnalyzerConfig):
         self.config = analyzer_config
         self.db_manager = DatabaseManager(db_config)
-        self.preprocessor = RefinedSystemFeedbackPreprocessor()
+        
+        # Use the new score-aware preprocessor
+        self.preprocessor = ScoreAwareSystemFeedbackPreprocessor()
         
         # Initialize cache manager with periodic saving
         cache_save_frequency = getattr(analyzer_config, 'cache_save_frequency', 10)
@@ -917,13 +1042,14 @@ class RefinedSystemFeedbackAnalyzer:
         
         self.llm_client = analyzer_config.llm_client
         
-        logger.info(f"🚀 Initialized Refined System Feedback Analyzer with:")
+        logger.info(f"🚀 Initialized ENHANCED System Feedback Analyzer with SCORE-AWARE preprocessing:")
         logger.info(f"  Model: {analyzer_config.llm_client.config.model}")
         logger.info(f"  Base URL: {analyzer_config.llm_client.config.base_url or 'OpenAI Default'}")
         logger.info(f"  Batch size: {analyzer_config.batch_size}")
         logger.info(f"  Parallel batches: {analyzer_config.parallel_batches}")
         logger.info(f"  Cache enabled: {analyzer_config.cache_enabled}")
         logger.info(f"  Cache save frequency: every {cache_save_frequency} entries")
+        logger.info(f"  🎯 SCORE-AWARE preprocessing optimized for 2-10 feedback score range")
         
         # Add cache status logging
         if analyzer_config.cache_enabled:
@@ -935,7 +1061,7 @@ class RefinedSystemFeedbackAnalyzer:
             logger.info("  Cache disabled")
     
     def analyze_messages(self, limit: Optional[int] = None) -> pd.DataFrame:
-        """Main method to analyze messages for system feedback tone with periodic caching."""
+        """Main method to analyze messages for system feedback tone with score-aware preprocessing."""
         start_time = time.time()
         
         try:
@@ -945,10 +1071,10 @@ class RefinedSystemFeedbackAnalyzer:
                 logger.warning("No messages found")
                 return pd.DataFrame()
             
-            logger.info(f"📈 Processing {len(messages_df)} messages with periodic cache saving")
+            logger.info(f"📈 Processing {len(messages_df)} messages with SCORE-AWARE preprocessing and periodic cache saving")
             
-            # Step 2: Refined preprocessing
-            potential_system_feedback, non_system_feedback = self._refined_preprocess_messages(messages_df)
+            # Step 2: Score-aware preprocessing
+            potential_system_feedback, non_system_feedback = self._score_aware_preprocess_messages(messages_df)
             
             # Step 3: Parallel LLM analysis with periodic caching
             system_feedback_results = self._analyze_potential_system_feedback_parallel(potential_system_feedback)
@@ -975,8 +1101,8 @@ class RefinedSystemFeedbackAnalyzer:
             # Ensure cache is always saved
             self.cache_manager.save_cache(force=True, reason="final cleanup")
     
-    def _refined_preprocess_messages(self, messages_df: pd.DataFrame) -> Tuple[List[dict], List[dict]]:
-        """Refined preprocessing with detailed signal analysis."""
+    def _score_aware_preprocess_messages(self, messages_df: pd.DataFrame) -> Tuple[List[dict], List[dict]]:
+        """Score-aware preprocessing with detailed signal analysis optimized for 2-10 range."""
         potential_system_feedback = []
         non_system_feedback = []
         
@@ -986,20 +1112,45 @@ class RefinedSystemFeedbackAnalyzer:
             'non_feedback': 0,
             'high_confidence': 0,
             'medium_confidence': 0,
-            'low_confidence': 0
+            'low_confidence': 0,
+            'score_2_10_range': 0,  # Messages in the sweet spot
+            'score_too_high': 0,    # Messages with score > 15
+            'score_too_low': 0,     # Messages with score < 1.5
+            'length_filtered': 0,   # Messages too long
+            'question_filtered': 0  # Long questions filtered out
         }
         
         for _, row in messages_df.iterrows():
             preprocessing_stats['total_analyzed'] += 1
             
-            # Get detailed analysis
+            # Get detailed analysis with score-aware classification
             classification = self.preprocessor.get_classification_reasoning(row['input'])
+            
+            # Track score distribution
+            score = classification['score']
+            if 2.0 <= score <= 10.0:
+                preprocessing_stats['score_2_10_range'] += 1
+            elif score > 15.0:
+                preprocessing_stats['score_too_high'] += 1
+            elif score < 1.5:
+                preprocessing_stats['score_too_low'] += 1
+            
+            # Track length filtering
+            word_count = classification['word_count']
+            if word_count > 80:
+                preprocessing_stats['length_filtered'] += 1
+            
+            # Track question filtering
+            characteristics = classification.get('characteristics', {})
+            if characteristics.get('has_question_mark') and word_count > 20:
+                preprocessing_stats['question_filtered'] += 1
             
             message_data = {
                 'row': row,
                 'classification': classification['classification'],
                 'confidence': classification['confidence'],
                 'score': classification['score'],
+                'word_count': classification['word_count'],
                 'signals': classification['signals_detected'],
                 'reasoning': classification['reasoning']
             }
@@ -1019,15 +1170,23 @@ class RefinedSystemFeedbackAnalyzer:
                 non_system_feedback.append(message_data)
                 preprocessing_stats['non_feedback'] += 1
         
-        # Log detailed preprocessing results
-        logger.info(f"Refined preprocessing complete:")
+        # Log detailed score-aware preprocessing results
+        logger.info(f"🎯 SCORE-AWARE preprocessing complete:")
         logger.info(f"  Total messages: {preprocessing_stats['total_analyzed']}")
         logger.info(f"  Feedback candidates: {preprocessing_stats['feedback_candidates']}")
         logger.info(f"  Non-feedback: {preprocessing_stats['non_feedback']}")
-        logger.info(f"  High confidence: {preprocessing_stats['high_confidence']}")
-        logger.info(f"  Medium confidence: {preprocessing_stats['medium_confidence']}")
-        logger.info(f"  Low confidence: {preprocessing_stats['low_confidence']}")
-        logger.info(f"  Efficiency: {preprocessing_stats['non_feedback']/preprocessing_stats['total_analyzed']*100:.1f}% filtered")
+        logger.info(f"  📊 Score distribution:")
+        logger.info(f"    Sweet spot (2-10): {preprocessing_stats['score_2_10_range']} ({preprocessing_stats['score_2_10_range']/preprocessing_stats['total_analyzed']*100:.1f}%)")
+        logger.info(f"    Too high (>15): {preprocessing_stats['score_too_high']} ({preprocessing_stats['score_too_high']/preprocessing_stats['total_analyzed']*100:.1f}%)")
+        logger.info(f"    Too low (<1.5): {preprocessing_stats['score_too_low']} ({preprocessing_stats['score_too_low']/preprocessing_stats['total_analyzed']*100:.1f}%)")
+        logger.info(f"  📏 Filtering effectiveness:")
+        logger.info(f"    Length filtered (>80 words): {preprocessing_stats['length_filtered']}")
+        logger.info(f"    Question filtered (long ?): {preprocessing_stats['question_filtered']}")
+        logger.info(f"  🎯 Confidence distribution:")
+        logger.info(f"    High confidence (≥0.9): {preprocessing_stats['high_confidence']}")
+        logger.info(f"    Medium confidence (≥0.7): {preprocessing_stats['medium_confidence']}")
+        logger.info(f"    Low confidence (<0.7): {preprocessing_stats['low_confidence']}")
+        logger.info(f"  ⚡ Efficiency: {preprocessing_stats['non_feedback']/preprocessing_stats['total_analyzed']*100:.1f}% filtered before LLM")
         
         return potential_system_feedback, non_system_feedback
     
@@ -1072,7 +1231,8 @@ class RefinedSystemFeedbackAnalyzer:
                     'original_index': i,
                     'text': msg['row']['input'],
                     'preprocessing_confidence': msg['confidence'],
-                    'preprocessing_score': msg['score']
+                    'preprocessing_score': msg['score'],
+                    'word_count': msg['word_count']
                 })
                 
                 if len(current_batch) >= self.config.batch_size:
@@ -1125,7 +1285,7 @@ class RefinedSystemFeedbackAnalyzer:
     def _combine_results(self, potential_system_feedback: List[dict], 
                         non_system_feedback: List[dict], 
                         system_feedback_results: List[SystemFeedbackConfirmation]) -> List[dict]:
-        """Combine all analysis results with enhanced metadata."""
+        """Combine all analysis results with enhanced metadata including score-aware info."""
         final_results = []
         
         # Add confirmed system feedback results
@@ -1147,7 +1307,7 @@ class RefinedSystemFeedbackAnalyzer:
             result = SystemFeedbackConfirmation(
                 has_system_feedback=False,
                 confidence_score=msg['confidence'],
-                reasoning=f"Preprocessing: {msg['reasoning']}",
+                reasoning=f"Score-aware preprocessing: {msg['reasoning']}",
                 feedback_type="non_system"
             )
             final_results.append(self._create_enhanced_result_dict(msg, result, 'non_system_feedback'))
@@ -1157,7 +1317,7 @@ class RefinedSystemFeedbackAnalyzer:
     def _create_enhanced_result_dict(self, msg_data: dict, 
                                    result: SystemFeedbackConfirmation, 
                                    preprocessing_result: str) -> dict:
-        """Create enhanced result dictionary with preprocessing insights."""
+        """Create enhanced result dictionary with score-aware preprocessing insights."""
         return {
             'emp_id': msg_data['row']['emp_id'],
             'session_id': msg_data['row']['session_id'],
@@ -1171,6 +1331,7 @@ class RefinedSystemFeedbackAnalyzer:
             'preprocessing_result': preprocessing_result,
             'preprocessing_confidence': msg_data.get('confidence', 0.0),
             'preprocessing_score': msg_data.get('score', 0.0),
+            'preprocessing_word_count': msg_data.get('word_count', 0),
             'preprocessing_reasoning': msg_data.get('reasoning', ''),
             'temporal_signals': ', '.join(msg_data.get('signals', {}).get('temporal', [])),
             'evaluation_signals': ', '.join(msg_data.get('signals', {}).get('evaluation', [])),
@@ -1181,14 +1342,14 @@ class RefinedSystemFeedbackAnalyzer:
     def _save_results(self, results_df: pd.DataFrame) -> str:
         """Save results to CSV file with metadata."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"refined_system_feedback_analysis_{timestamp}.csv"
+        filename = f"score_aware_system_feedback_analysis_{timestamp}.csv"
         results_df.to_csv(filename, index=False)
         logger.info(f"Results saved to {filename}")
         return filename
     
     def _log_comprehensive_summary(self, results_df: pd.DataFrame, start_time: float, 
                                  non_system_feedback_count: int, filename: str):
-        """Log comprehensive analysis summary with performance metrics."""
+        """Log comprehensive analysis summary with score-aware performance metrics."""
         processing_time = time.time() - start_time
         
         # Analysis results
@@ -1200,6 +1361,13 @@ class RefinedSystemFeedbackAnalyzer:
         error_count = len(results_df[results_df['feedback_type'] == 'error'])
         non_system_count = len(results_df[results_df['feedback_type'] == 'non_system'])
         system_evaluation_count = len(results_df[results_df['feedback_type'] == 'system_evaluation'])
+        
+        # Score-aware statistics
+        score_2_10_feedback = len(results_df[(results_df['preprocessing_score'] >= 2.0) & 
+                                           (results_df['preprocessing_score'] <= 10.0) & 
+                                           (results_df['has_system_feedback'] == True)])
+        avg_feedback_score = results_df[results_df['has_system_feedback'] == True]['preprocessing_score'].mean()
+        avg_non_feedback_score = results_df[results_df['has_system_feedback'] == False]['preprocessing_score'].mean()
         
         # Cache performance
         cache_stats = self.cache_manager.get_stats()
@@ -1222,7 +1390,7 @@ class RefinedSystemFeedbackAnalyzer:
         estimated_savings = llm_calls_saved * 0.01
         
         logger.info("=" * 80)
-        logger.info("REFINED SYSTEM FEEDBACK ANALYSIS COMPREHENSIVE SUMMARY")
+        logger.info("🎯 SCORE-AWARE SYSTEM FEEDBACK ANALYSIS COMPREHENSIVE SUMMARY")
         logger.info("=" * 80)
         
         # Performance metrics
@@ -1231,13 +1399,19 @@ class RefinedSystemFeedbackAnalyzer:
         logger.info(f"  Messages per second: {total_messages / processing_time:.1f}")
         logger.info(f"  Total messages processed: {total_messages:,}")
         
-        # Efficiency metrics
-        logger.info("⚡ EFFICIENCY METRICS:")
+        # Score-aware efficiency metrics
+        logger.info("🎯 SCORE-AWARE EFFICIENCY METRICS:")
         logger.info(f"  Preprocessing efficiency: {efficiency_percent:.1f}% filtered")
         logger.info(f"  LLM calls made: {llm_calls_made:,}")
         logger.info(f"  LLM calls saved: {llm_calls_saved:,}")
         logger.info(f"  Estimated cost: ${estimated_cost:.2f}")
         logger.info(f"  Estimated savings: ${estimated_savings:.2f}")
+        
+        # Score distribution analysis
+        logger.info("📈 SCORE DISTRIBUTION ANALYSIS:")
+        logger.info(f"  Feedback in optimal range (2-10): {score_2_10_feedback:,}")
+        logger.info(f"  Average feedback score: {avg_feedback_score:.2f}")
+        logger.info(f"  Average non-feedback score: {avg_non_feedback_score:.2f}")
         
         # Accuracy metrics
         logger.info("🎯 ACCURACY METRICS:")
@@ -1268,6 +1442,7 @@ class RefinedSystemFeedbackAnalyzer:
         logger.info(f"  Model: {self.llm_client.config.model}")
         logger.info(f"  Max retries: {self.config.max_retries}")
         logger.info(f"  Cache save frequency: {self.cache_manager.save_frequency}")
+        logger.info(f"  🎯 Score-aware preprocessing: 2-10 optimal range")
         
         logger.info("📁 OUTPUT:")
         logger.info(f"  Results file: {filename}")
@@ -1297,11 +1472,115 @@ def initialize_client_from_env() -> GenericLLMClient:
     return create_client_from_env()
 
 # ============================================================================
-# MAIN ENTRY POINT WITH PERIODIC CACHE SAVING
+# TESTING FUNCTION FOR SCORE-AWARE PREPROCESSING
+# ============================================================================
+
+def test_score_aware_preprocessing():
+    """Test the score-aware preprocessing with various examples."""
+    
+    preprocessor = ScoreAwareSystemFeedbackPreprocessor()
+    
+    # Test cases with expected score ranges
+    test_cases = [
+        # EXPECTED FEEDBACK (score 2-10, short)
+        ("Your response was helpful", "feedback"),
+        ("That didn't work", "feedback"),
+        ("Good answer", "feedback"),
+        ("Not quite right", "feedback"),
+        ("Thanks, that helped", "feedback"),
+        ("Your suggestion was perfect", "feedback"),
+        ("I like this approach", "feedback"),
+        ("This makes sense now", "feedback"),
+        ("Better than before", "feedback"),
+        ("Still not working", "feedback"),
+        
+        # EXPECTED NON-FEEDBACK (various reasons)
+        ("Please help me write a Python function to calculate fibonacci numbers", "instruction"),
+        ("Can you explain how machine learning algorithms work in detail?", "instruction"),
+        ("I need you to analyze this complex dataset and provide insights about customer behavior patterns", "instruction"),
+        ("What are the best practices for software development in large teams?", "instruction"),
+        ("Generate a comprehensive business plan for a startup company", "instruction"),
+        ("Your task is to review this document and summarize the key findings", "instruction"),
+        ("Act as a financial advisor and help me create an investment portfolio", "instruction"),
+        ("How do I implement a neural network from scratch using Python?", "instruction"),
+        ("Create a detailed marketing strategy for launching a new product", "instruction"),
+        ("Explain the differences between various database management systems", "instruction")
+    ]
+    
+    print("🧪 TESTING SCORE-AWARE PREPROCESSING:")
+    print("=" * 80)
+    
+    feedback_correct = 0
+    feedback_total = 0
+    instruction_correct = 0
+    instruction_total = 0
+    
+    for text, expected in test_cases:
+        result = preprocessor.get_classification_reasoning(text)
+        classification = result['classification']
+        score = result['score']
+        word_count = result['word_count']
+        reasoning = result['reasoning']
+        
+        is_correct = classification == expected
+        status = "✅" if is_correct else "❌"
+        
+        print(f"{status} {expected.upper()}: Score={score:.1f}, Words={word_count}")
+        print(f"   Text: '{text}'")
+        print(f"   Result: {classification}")
+        print(f"   Reason: {reasoning}")
+        print()
+        
+        if expected == "feedback":
+            feedback_total += 1
+            if is_correct:
+                feedback_correct += 1
+        else:
+            instruction_total += 1
+            if is_correct:
+                instruction_correct += 1
+    
+    print("📊 RESULTS:")
+    print(f"Feedback Detection: {feedback_correct}/{feedback_total} ({feedback_correct/feedback_total*100:.1f}%)")
+    print(f"Instruction Filtering: {instruction_correct}/{instruction_total} ({instruction_correct/instruction_total*100:.1f}%)")
+    print(f"Overall Accuracy: {(feedback_correct + instruction_correct)/(feedback_total + instruction_total)*100:.1f}%")
+    
+    # Score distribution analysis
+    print("\n📈 SCORE DISTRIBUTION:")
+    feedback_scores = []
+    instruction_scores = []
+    
+    for text, expected in test_cases:
+        result = preprocessor.get_classification_reasoning(text)
+        if expected == "feedback":
+            feedback_scores.append(result['score'])
+        else:
+            instruction_scores.append(result['score'])
+    
+    if feedback_scores:
+        print(f"Feedback scores: {min(feedback_scores):.1f} - {max(feedback_scores):.1f} (avg: {sum(feedback_scores)/len(feedback_scores):.1f})")
+    if instruction_scores:
+        print(f"Instruction scores: {min(instruction_scores):.1f} - {max(instruction_scores):.1f} (avg: {sum(instruction_scores)/len(instruction_scores):.1f})")
+
+# ============================================================================
+# FACTORY FUNCTION FOR EASY INITIALIZATION
+# ============================================================================
+
+def create_score_aware_analyzer(db_config: DatabaseConfig, analyzer_config: AnalyzerConfig):
+    """Create analyzer with score-aware preprocessing."""
+    
+    analyzer = EnhancedSystemFeedbackAnalyzer(db_config, analyzer_config)
+    
+    logger.info("🎯 Using SCORE-AWARE preprocessor (optimized for 2-10 score range)")
+    
+    return analyzer
+
+# ============================================================================
+# MAIN ENTRY POINT WITH SCORE-AWARE PREPROCESSING
 # ============================================================================
 
 def main():
-    """Main entry point with periodic cache saving configuration."""
+    """Main entry point with score-aware preprocessing configuration."""
     try:
         # Database configuration
         db_config = DatabaseConfig(
@@ -1322,22 +1601,22 @@ def main():
         if not llm_client.test_connection():
             raise Exception("LLM connection test failed")
         
-        # Analyzer configuration with periodic cache saving
+        # Analyzer configuration with score-aware preprocessing
         analyzer_config = AnalyzerConfig(
             llm_client=llm_client,
             batch_size=10,                    # Messages per batch
             parallel_batches=5,               # Number of parallel batches
             cache_enabled=True,
-            cache_file="refined_system_feedback_cache.pkl",
+            cache_file="score_aware_system_feedback_cache.pkl",
             cache_save_frequency=10,          # Save cache after every 10 new entries
             max_retries=3,
             retry_delay=1.0
         )
         
-        logger.info(f"🎯 Starting analysis with cache saving every {analyzer_config.cache_save_frequency} entries")
+        logger.info(f"🎯 Starting SCORE-AWARE analysis with cache saving every {analyzer_config.cache_save_frequency} entries")
         
-        # Initialize and run analyzer
-        analyzer = RefinedSystemFeedbackAnalyzer(db_config, analyzer_config)
+        # Initialize and run analyzer with score-aware preprocessing
+        analyzer = create_score_aware_analyzer(db_config, analyzer_config)
         results = analyzer.analyze_messages(limit=100000)
         
         # Display results summary
@@ -1346,26 +1625,34 @@ def main():
             total_messages = len(results)
             efficiency = len(results[results['preprocessing_result'] == 'non_system_feedback']) / total_messages
             
-            print(f"\n🎯 ANALYSIS COMPLETE WITH PERIODIC CACHING!")
+            # Score-aware statistics
+            score_2_10_feedback = len(results[(results['preprocessing_score'] >= 2.0) & 
+                                             (results['preprocessing_score'] <= 10.0) & 
+                                             (results['has_system_feedback'] == True)])
+            avg_feedback_score = results[results['has_system_feedback'] == True]['preprocessing_score'].mean()
+            
+            print(f"\n🎯 SCORE-AWARE ANALYSIS COMPLETE WITH PERIODIC CACHING!")
             print(f"📊 Total messages analyzed: {total_messages:,}")
             print(f"💬 Messages with system feedback: {system_feedback_count:,}")
             print(f"📈 System feedback rate: {system_feedback_count/total_messages*100:.2f}%")
             print(f"⚡ Preprocessing efficiency: {efficiency*100:.1f}% filtered")
+            print(f"🎯 Feedback in optimal score range (2-10): {score_2_10_feedback:,}")
+            print(f"📊 Average feedback score: {avg_feedback_score:.2f}")
             print(f"💾 Cache saved periodically every {analyzer_config.cache_save_frequency} entries")
             
-            # Show example system feedback messages
+            # Show example system feedback messages with scores
             system_feedback_examples = results[results['has_system_feedback'] == True].head(3)
             if not system_feedback_examples.empty:
                 print(f"\n📝 Example system feedback messages:")
                 for i, (_, row) in enumerate(system_feedback_examples.iterrows(), 1):
-                    print(f"\n{i}. Confidence: {row['confidence_score']:.2f}")
+                    print(f"\n{i}. LLM Confidence: {row['confidence_score']:.2f} | Preprocessing Score: {row['preprocessing_score']:.1f} | Words: {row['preprocessing_word_count']}")
                     print(f"   Type: {row['feedback_type']}")
                     print(f"   Text: {row['input_text'][:100]}...")
                     print(f"   LLM Reason: {row['reasoning']}")
                     print(f"   Preprocessing: {row['preprocessing_reasoning']}")
         else:
             print("No results generated. Check your database connection and data.")
-            
+    
     except Exception as e:
         logger.error(f"Analysis failed: {e}")
         print(f"❌ Error: {e}")
@@ -1374,5 +1661,13 @@ def main():
         print("  - Configure your OpenAI API key")
         print("  - Install required packages: pip install openai instructor psycopg2-binary pandas")
 
+# ============================================================================
+# EXAMPLE USAGE AND TESTING
+# ============================================================================
+
 if __name__ == "__main__":
+    # Uncomment to test the score-aware preprocessing
+    # test_score_aware_preprocessing()
+    
+    # Run the main analysis
     main()
