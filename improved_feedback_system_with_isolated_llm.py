@@ -1621,8 +1621,14 @@ def main():
             print(f"=" * 70)
             print(f"🎯 TIME-BASED ANALYSIS READY FOR PRODUCTION!")
             
-        else:
-            print("❌ No results generated. Check configuration and time parameters.")
+    except Exception as e:
+        logger.error(f"Enhanced analysis failed: {e}")
+        print(f"❌ Error: {e}")
+        print("💡 Setup checklist:")
+        print("  ✓ Database connection configured")
+        print("  ✓ OpenAI API key set")
+        print("  ✓ Required packages installed")
+        print("  ✓ Sufficient memory for large dataset processing")
 
 def analyze_specific_time_period():
     """Example function showing different time-based analysis options."""
